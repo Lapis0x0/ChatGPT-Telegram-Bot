@@ -897,6 +897,9 @@ async def post_init(application: Application) -> None:
 @decorators.APICheck
 async def plan_messages(update, context):
     """手动触发消息规划"""
+    if not proactive_messaging.PROACTIVE_AGENT_ENABLED:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="主动消息功能未启用")
+        return
     result = await proactive_messaging.trigger_message_planning(context)
     await context.bot.send_message(chat_id=update.effective_chat.id, text=result)
 
@@ -905,6 +908,9 @@ async def plan_messages(update, context):
 @decorators.APICheck
 async def test_message(update, context):
     """发送测试消息"""
+    if not proactive_messaging.PROACTIVE_AGENT_ENABLED:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="主动消息功能未启用")
+        return
     result = await proactive_messaging.send_test_message(context, str(update.effective_chat.id))
     await context.bot.send_message(chat_id=update.effective_chat.id, text=result)
 

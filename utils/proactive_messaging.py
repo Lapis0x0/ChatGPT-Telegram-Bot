@@ -276,28 +276,13 @@ def extract_time_from_response(response):
     return message_times
 
 # 发送主动消息
-async def send_proactive_message(context: ContextTypes.DEFAULT_TYPE):
-    """发送主动消息给用户"""
-    job_data = context.job.data
-    user_id = job_data["user_id"]
-    reason = job_data["reason"]
-    
-    # 构建提示词，让AI生成消息内容
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
-    content_prompt = f"""
-    现在是 {current_time}。
-    基于以下原因，你决定在这个时间点主动联系用户："{reason}"
-    
-    请生成一条自然、有价值的消息，考虑用户的可能兴趣。
-    消息应该是对话式的，就像你主动联系用户一样。
-    不要提及你是按计划发送这条消息的事实。
-    """
-    
+async def send_proactive_message(context: ContextTypes.DEFAULT_TYPE, user_id: str, reason: str):
+    """发送主动消息"""
     try:
-        # 调用AI获取消息内容
-        message_content = await get_ai_response(
-            user_id=user_id, 
-            message=content_prompt, 
+        # 生成消息内容
+        message_content = await generate_message_content(
+            user_id=user_id,
+            reason=reason,
             system_prompt=PROACTIVE_AGENT_SYSTEM_PROMPT,
             save_to_history=False,  # 不保存这个生成过程到用户的对话历史
             model=PROACTIVE_AGENT_MODEL  # 使用指定的模型
@@ -337,11 +322,7 @@ async def send_test_message(context: ContextTypes.DEFAULT_TYPE, user_id=None):
     if not user_id:
         return "未配置管理员ID，无法发送测试消息"
     
-    await send_proactive_message(context._job_queue.run_once(
-        lambda _: None, 
-        when=0,
-        data={"user_id": user_id, "reason": "测试主动消息功能"}
-    ))
+    await send_proactive_message(context, user_id, "测试主动消息功能")
     
     return f"已发送测试消息给用户 {user_id}"
 
