@@ -4,3 +4,4 @@ __pycache__/
 .env
 user_configs
 pyrightconfig.json
+docker-compose.yml

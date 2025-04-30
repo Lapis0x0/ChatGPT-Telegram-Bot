@@ -5,6 +5,7 @@ import random
 from datetime import datetime, timedelta
 import asyncio
 import re
+import datetime as dt
 
 from telegram.ext import ContextTypes
 from config import Users, get_robot
@@ -42,22 +43,27 @@ def get_admin_ids():
 # 获取AI响应
 async def get_ai_response(user_id, message, system_prompt, save_to_history=True, model=None):
     """调用AI获取响应"""
-    robot = get_robot()
+    # get_robot() 返回的是一个元组 (robot, role, api_key, api_url)
+    robot, role, api_key, api_url = get_robot(str(user_id))
     response = ""
     
     # 使用指定的模型，如果未指定则使用默认模型
     model_name = model or PROACTIVE_AGENT_MODEL or None
     
-    async for data in robot.ask_stream_async(
-        message, 
-        convo_id=str(user_id), 
-        system_prompt=system_prompt,
-        model=model_name
-    ):
-        if isinstance(data, str):
-            response += data
-    
-    return response
+    try:
+        async for data in robot.ask_stream_async(
+            message, 
+            convo_id=str(user_id), 
+            system_prompt=system_prompt,
+            model=model_name
+        ):
+            if isinstance(data, str):
+                response += data
+        
+        return response
+    except Exception as e:
+        logging.error(f"调用AI获取响应失败: {str(e)}")
+        return "无法获取AI响应，请稍后再试。"
 
 # 移除指定的任务
 def remove_job_if_exists(name, context):
@@ -92,6 +98,13 @@ async def plan_daily_messages(context: ContextTypes.DEFAULT_TYPE):
     
     # 为每个管理员规划消息
     for user_id in admin_ids:
+        # 先清除该用户之前的所有计划
+        remove_all_planned_messages(context, user_id)
+        
+        # 初始化该用户的计划列表
+        if user_id not in planned_message_times:
+            planned_message_times[user_id] = []
+            
         # 构建提示词，让AI决定今天的消息时间
         current_date = datetime.now().strftime('%Y-%m-%d')
         planning_prompt = f"""
@@ -110,69 +123,75 @@ async def plan_daily_messages(context: ContextTypes.DEFAULT_TYPE):
         注意：
         1. hour必须是0-23之间的整数
         2. minute必须是0-59之间的整数
-        3. 不要在JSON前后添加任何其他文本、代码块标记或解释
-        4. 确保JSON格式完全正确，可以被解析
+        3. 避免选择深夜和凌晨的时间（如22:00-7:00）
+        4. 选择的时间应该合理分布在一天中
         """
         
         try:
-            # 调用AI获取计划
+            # 调用AI获取建议的时间
             response = await get_ai_response(
-                user_id=user_id, 
-                message=planning_prompt, 
+                user_id=user_id,
+                message=planning_prompt,
                 system_prompt=PROACTIVE_AGENT_SYSTEM_PROMPT,
-                save_to_history=False,  # 不保存这个规划过程到用户的对话历史
-                model=PROACTIVE_AGENT_MODEL  # 使用指定的模型
+                save_to_history=False  # 不保存这个规划过程到用户的对话历史
             )
             
-            # 尝试多种方式提取和解析JSON
+            # 从AI响应中提取时间信息
             message_times = extract_time_from_response(response)
             
+            # 如果没有提取到有效的时间，使用默认时间
             if not message_times:
-                logging.warning(f"无法从响应中提取有效的时间信息: {response}")
-                continue
+                logging.warning(f"无法从AI响应中提取有效的时间信息，将使用默认时间。AI响应: {response}")
+                # 默认时间：上午10点、下午3点和晚上8点
+                message_times = [
+                    {"hour": 10, "minute": 0, "reason": "上午工作时间，用户可能需要一些信息或激励"},
+                    {"hour": 15, "minute": 0, "reason": "下午休息时间，用户可能需要放松"},
+                    {"hour": 20, "minute": 0, "reason": "晚上休闲时间，用户可能有空闲时间聊天"}
+                ]
             
-            # 清除之前的计划
-            remove_all_planned_messages(context, user_id)
-            
-            # 安排新的消息时间
+            # 为每个时间点安排任务
             scheduled_count = 0
+            current_time = datetime.now()
+            
             for time_slot in message_times:
                 try:
-                    hour = int(time_slot.get("hour", 12))
-                    minute = int(time_slot.get("minute", 0))
-                    reason = str(time_slot.get("reason", ""))
+                    hour = time_slot["hour"]
+                    minute = time_slot["minute"]
+                    reason = time_slot.get("reason", "未提供原因")
                     
-                    # 验证时间值的有效性
-                    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                        logging.warning(f"无效的时间值: hour={hour}, minute={minute}")
+                    # 创建今天的目标时间
+                    target_time = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    
+                    # 如果时间已经过去，跳过
+                    if target_time < current_time:
+                        logging.info(f"跳过已过去的时间: {target_time}")
                         continue
                     
-                    # 创建今天的时间对象
-                    now = datetime.now()
-                    message_time = datetime(now.year, now.month, now.day, hour, minute)
+                    # 计算延迟时间（秒）
+                    delay = (target_time - current_time).total_seconds()
                     
-                    # 如果时间已过，跳过这个时间点
-                    if message_time < now:
-                        continue
+                    # 创建任务名称
+                    job_name = f"proactive_message_{user_id}_{hour}_{minute}"
                     
-                    # 安排消息发送任务
-                    job = context.job_queue.run_once(
-                        send_proactive_message,
-                        message_time,
-                        data={"user_id": user_id, "reason": reason},
-                        name=f"proactive_message_{user_id}_{hour}_{minute}"
+                    # 移除同名任务（如果存在）
+                    remove_job_if_exists(job_name, context)
+                    
+                    # 添加新任务
+                    context.job_queue.run_once(
+                        lambda ctx: asyncio.ensure_future(send_proactive_message(ctx, user_id, reason)),
+                        when=delay,
+                        name=job_name
                     )
                     
-                    # 记录计划的消息时间
-                    if user_id not in planned_message_times:
-                        planned_message_times[user_id] = []
+                    # 保存到计划列表中
                     planned_message_times[user_id].append({
-                        "time": message_time,
-                        "job_id": job.id if hasattr(job, 'id') else str(random.randint(1000, 9999)),
+                        "time": target_time,
                         "reason": reason
                     })
                     
                     scheduled_count += 1
+                    logging.info(f"已为用户 {user_id} 安排消息，时间: {target_time}，原因: {reason}")
+                    
                 except (ValueError, TypeError) as e:
                     logging.error(f"处理时间槽时出错: {e}, 时间槽数据: {time_slot}")
             
@@ -296,7 +315,7 @@ async def send_proactive_message(context: ContextTypes.DEFAULT_TYPE, user_id: st
         
         # 将这条消息添加到对话历史中
         # 这里我们直接使用robot的方法来添加消息到历史
-        robot = get_robot()
+        robot, role, api_key, api_url = get_robot(str(user_id))
         robot.add_to_history(str(user_id), "assistant", message_content)
         
         logging.info(f"已发送主动消息给用户 {user_id}")
@@ -304,11 +323,60 @@ async def send_proactive_message(context: ContextTypes.DEFAULT_TYPE, user_id: st
     except Exception as e:
         logging.error(f"发送主动消息失败: {str(e)}")
 
+# 生成消息内容
+async def generate_message_content(user_id, reason, system_prompt, save_to_history=False, model=None):
+    """生成主动消息的内容"""
+    try:
+        # 构建提示词
+        prompt = f"""
+        请根据以下原因生成一条主动消息：
+        {reason}
+        
+        消息应该自然、友好，不要过于机械，也不要提及这是一条自动生成的消息。
+        消息长度应该适中，不要太长也不要太短。
+        """
+        
+        # 调用AI获取响应
+        response = await get_ai_response(
+            user_id=user_id,
+            message=prompt,
+            system_prompt=system_prompt,
+            save_to_history=save_to_history,
+            model=model
+        )
+        
+        return response.strip()
+    except Exception as e:
+        logging.error(f"生成消息内容失败: {str(e)}")
+        return f"嗨，我想和你聊聊天。{reason}"
+
 # 手动触发消息规划（用于测试）
 async def trigger_message_planning(context: ContextTypes.DEFAULT_TYPE):
     """手动触发消息规划，用于测试"""
     await plan_daily_messages(context)
-    return "已触发消息规划"
+    
+    # 返回已规划的时间信息
+    result = "已触发消息规划\n\n"
+    
+    # 获取管理员ID列表
+    admin_ids = get_admin_ids()
+    
+    # 检查是否有规划的消息
+    has_plans = False
+    for user_id in admin_ids:
+        if user_id in planned_message_times and planned_message_times[user_id]:
+            has_plans = True
+            result += f"用户 {user_id} 的规划时间：\n"
+            for plan in planned_message_times[user_id]:
+                time_str = plan['time'].strftime('%H:%M')
+                reason = plan.get('reason', '未提供原因')
+                result += f"- {time_str} - {reason}\n"
+            result += "\n"
+    
+    if not has_plans:
+        result += "当前没有规划的消息时间。"
+    
+    return result
 
 # 手动发送测试消息（用于测试）
 async def send_test_message(context: ContextTypes.DEFAULT_TYPE, user_id=None):
@@ -342,7 +410,7 @@ def init_proactive_messaging(application):
         # 每天凌晨1点规划当天的消息
         application.job_queue.run_daily(
             plan_daily_messages,
-            time=datetime.time(hour=1, minute=0),
+            time=dt.time(hour=1, minute=0),
             name="daily_message_planning"
         )
         
