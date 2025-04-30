@@ -5,6 +5,7 @@ sys.dont_write_bytecode = True
 import logging
 import traceback
 import utils.decorators as decorators
+import utils.proactive_messaging as proactive_messaging
 
 from md2tgmd.src.md2tgmd import escape, split_code, replace_all
 from aient.src.aient.utils.prompt import translator_en2zh_prompt, translator_prompt
@@ -883,11 +884,29 @@ async def post_init(application: Application) -> None:
         BotCommand('model', 'Change AI model'),
         BotCommand('en2zh', 'Translate to Chinese'),
         BotCommand('zh2en', 'Translate to English'),
+        BotCommand('plan_messages', 'Plan proactive messages'),
+        BotCommand('test_message', 'Send a test proactive message'),
     ])
     description = (
         "I am an Assistant, a large language model trained by OpenAI. I will do my best to help answer your questions."
     )
     await application.bot.set_my_description(description)
+
+@decorators.GroupAuthorization
+@decorators.Authorization
+@decorators.APICheck
+async def plan_messages(update, context):
+    """手动触发消息规划"""
+    result = await proactive_messaging.trigger_message_planning(context)
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=result)
+
+@decorators.GroupAuthorization
+@decorators.Authorization
+@decorators.APICheck
+async def test_message(update, context):
+    """发送测试消息"""
+    result = await proactive_messaging.send_test_message(context, str(update.effective_chat.id))
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=result)
 
 if __name__ == '__main__':
     application = (
@@ -915,6 +934,8 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("model", change_model))
     application.add_handler(CommandHandler("en2zh", lambda update, context: command_bot(update, context, "Simplified Chinese")))
     application.add_handler(CommandHandler("zh2en", lambda update, context: command_bot(update, context, "english")))
+    application.add_handler(CommandHandler("plan_messages", plan_messages))
+    application.add_handler(CommandHandler("test_message", test_message))
     application.add_handler(InlineQueryHandler(inlinequery))
     application.add_handler(CallbackQueryHandler(button_press))
     application.add_handler(MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, lambda update, context: command_bot(update, context, prompt=None, has_command=False), block = False))
@@ -955,6 +976,9 @@ if __name__ == '__main__':
     application.add_handler(MessageHandler(filters.COMMAND, unknown))
     application.add_error_handler(error)
 
+    # 初始化主动消息功能
+    proactive_messaging.init_proactive_messaging(application)
+    
     if WEB_HOOK:
         print("WEB_HOOK:", WEB_HOOK)
         application.run_webhook("0.0.0.0", PORT, webhook_url=WEB_HOOK)

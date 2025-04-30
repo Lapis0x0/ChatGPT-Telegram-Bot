@@ -1,12 +1,33 @@
 version: "3.5"
+
 services:
   chatgptbot:
-    container_name: chatgptbot
     image: yym68686/chatgpt:latest
+    container_name: chatgptbot
+
     environment:
-      - BOT_TOKEN=
-      - API=
-      - API_URL=
+      BOT_TOKEN: 
+      GOOGLE_AI_API_KEY: 
+      ADMIN_LIST: ""
+      CUSTOM_MODELS: "-all,gemini-2.5-pro-preview-03-25,gemini-2.5-flash-preview-04-17"
+      temperature: "0.7"
+      CHAT_MODE: global
+      PASS_HISTORY: 20
+      PROACTIVE_AGENT_ENABLED: "True"
+      PROACTIVE_AGENT_SYSTEM_PROMPT: |-
+        # 你的角色基本信息
+        
+        # 主动消息任务
+        作为用户的助手，你有一项特殊任务：主动与用户沟通。你需要：
+        1. 每天决定2-3个适合的时间点，在这些时间点主动与用户联系
+        2. 根据用户的历史对话和兴趣，生成符合你角色人设的、有价值、有趣的消息
+        3. 避免在不适当的时间（如深夜）打扰用户
+        4. 你的消息应该有目的性，可以是：分享知识、提醒事项、询问进展、推荐内容等
+        5. 消息风格和内容必须与你的角色人设保持一致
+        
+        请记住，你的目标是增强用户体验，让用户感受到你的陪伴和关心，而不是打扰用户。
+      SYSTEMPROMPT: |-
+        # 你的角色基本信息
     volumes:
       - ./user_configs:/home/user_configs
     ports:
