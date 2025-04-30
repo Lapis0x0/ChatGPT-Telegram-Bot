@@ -2,7 +2,8 @@ version: "3.5"
 
 services:
   chatgptbot:
-    image: yym68686/chatgpt:latest
+    # image: yym68686/chatgpt:latest
+    build: .
     container_name: chatgptbot
 
     environment:
@@ -31,5 +32,7 @@ services:
         # 你的角色基本信息
     volumes:
       - ./user_configs:/home/user_configs
+      - ./utils:/home/utils
+      - ./bot.py:/home/bot.py
     ports:
       - 80:8080
