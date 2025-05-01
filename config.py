@@ -80,9 +80,9 @@ LANGUAGES_TO_CODE = {
 
 current_date = datetime.now()
 Current_Date = current_date.strftime("%Y-%m-%d")
-systemprompt = os.environ.get('SYSTEMPROMPT', prompt.system_prompt.format(LANGUAGE, Current_Date))
+SYSTEM_PROMPT = os.environ.get('SYSTEMPROMPT', prompt.system_prompt.format(LANGUAGE, Current_Date))
+systemprompt = SYSTEM_PROMPT
 claude_systemprompt = os.environ.get('SYSTEMPROMPT', prompt.claude_system_prompt.format(LANGUAGE))
-
 
 import json
 from contextlib import contextmanager
@@ -326,7 +326,7 @@ Users = UserConfig(mode=CHAT_MODE, api_key=API, api_url=API_URL, engine=GPT_ENGI
 temperature = float(os.environ.get('temperature', '0.5'))
 CLAUDE_API = os.environ.get('claude_api_key', None)
 
-ChatGPTbot, SummaryBot, groqBot, vertexBot, whisperBot, duckBot = None, None, None, None, None, None
+ChatGPTbot, SummaryBot, groqBot, vertexBot, whisperBot, duckBot = None, None, None, None, None
 def InitEngine(chat_id=None):
     global Users, ChatGPTbot, SummaryBot, groqBot, vertexBot, whisperBot, duckBot
     api_key = Users.get_config(chat_id, "api_key")

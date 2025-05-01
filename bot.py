@@ -6,6 +6,8 @@ import logging
 import traceback
 import utils.decorators as decorators
 import utils.proactive_messaging as proactive_messaging
+from utils.memory_integration import process_memory, get_memory_enhanced_prompt, add_explicit_memory, list_memories, forget_memory, track_conversation, force_summarize_memory
+import utils.proactive_messaging as proactive_messaging
 
 from md2tgmd.src.md2tgmd import escape, split_code, replace_all
 from aient.src.aient.utils.prompt import translator_en2zh_prompt, translator_prompt
@@ -91,6 +93,12 @@ time_stamps = defaultdict(lambda: [])
 async def command_bot(update, context, language=None, prompt=translator_prompt, title="", has_command=True):
     stop_event.clear()
     message, rawtext, image_url, chatid, messageid, reply_to_message_text, update_message, message_thread_id, convo_id, file_url, reply_to_message_file_content, voice_text = await GetMesageInfo(update, context)
+
+    # 异步处理记忆，但不阻塞主对话流程
+    if not has_command and config.ChatGPTbot is not None and message is not None:
+        # 只使用track_conversation跟踪对话，它会在达到15轮后自动总结
+        # 移除对每条消息的即时分析，避免重复处理和API调用
+        asyncio.create_task(track_conversation(str(convo_id), "user", message, config.ChatGPTbot))
 
     if has_command == False or len(context.args) > 0:
         if has_command:
@@ -253,6 +261,11 @@ async def getChatGPT(update_message, context, title, robot, message, chatid, mes
         system_prompt = Users.get_config(convo_id, "claude_systemprompt")
     else:
         system_prompt = Users.get_config(convo_id, "systemprompt")
+        
+    # 使用增强了记忆的系统提示词
+    memory_enhanced_prompt = get_memory_enhanced_prompt(str(convo_id), system_prompt)
+    system_prompt = memory_enhanced_prompt
+
     plugins = Users.extract_plugins_config(convo_id)
 
     Frequency_Modification = 20
@@ -408,9 +421,20 @@ async def getChatGPT(update_message, context, title, robot, message, chatid, mes
                     lastresult = now_result
                 except Exception as e:
                     # print('\033[31m')
-                    # print("error: edit_message_text")
+                    print("1: Unexpected error4:", type(e), str(e))
                     # print('\033[0m')
-                    continue
+            
+            modifytime += 1
+            
+        # 当完成对话生成后，跟踪机器人的回复
+        try:
+            asyncio.create_task(track_conversation(str(convo_id), "assistant", result, robot))
+        except Exception as e:
+            # 即使记忆跟踪失败，也不影响主对话
+            logging.error(f"跟踪机器人回复时出错: {str(e)}")
+        
+        tmpresult = result.replace("```", "")
+
     except Exception as e:
         print('\033[31m')
         traceback.print_exc()
@@ -888,6 +912,10 @@ async def post_init(application: Application) -> None:
         BotCommand('test_message', 'Send a test proactive message'),
         BotCommand('view_messages', 'View planned messages'),
         BotCommand('set_message_time', 'Set message time'),
+        BotCommand('remember', 'Remember something'),
+        BotCommand('memories', 'List all memories'),
+        BotCommand('forget', 'Forget a memory'),
+        BotCommand('summarize_memory', 'Summarize current conversation memory'),
     ])
     description = (
         "I am an Assistant, a large language model trained by OpenAI. I will do my best to help answer your questions."
@@ -962,6 +990,115 @@ async def set_message_time(update, context):
     
     await context.bot.send_message(chat_id=update.effective_chat.id, text=result)
 
+@decorators.GroupAuthorization
+@decorators.Authorization
+@decorators.APICheck
+async def remember(update, context):
+    """记住指定的信息"""
+    if not context.args or len(context.args) == 0:
+        usage = "使用方法: /remember [要记住的内容]\n\n例如:\n/remember 我喜欢吃巧克力\n/remember 我的生日是5月12日"
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=usage)
+        return
+    
+    content = " ".join(context.args)
+    user_id = str(update.effective_chat.id)
+    
+    # 尝试添加到记忆
+    success = await add_explicit_memory(user_id, content, importance=4)
+    
+    if success:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id, 
+            text=f"我已经记住了：'{content}'\n\n这条记忆将会影响我们未来的对话。"
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id, 
+            text="很抱歉，我无法保存这条记忆。请稍后再试。"
+        )
+
+@decorators.GroupAuthorization
+@decorators.Authorization
+@decorators.APICheck
+async def memories(update, context):
+    """列出所有记忆"""
+    user_id = str(update.effective_chat.id)
+    
+    # 获取记忆列表
+    memory_list = await list_memories(user_id, max_count=15)
+    
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id, 
+        text=memory_list
+    )
+
+@decorators.GroupAuthorization
+@decorators.Authorization
+@decorators.APICheck
+async def forget(update, context):
+    """忘记特定的记忆"""
+    if not context.args or len(context.args) == 0:
+        usage = "使用方法: /forget [记忆ID]\n\n例如:\n/forget 1\n\n使用 /memories 命令查看所有记忆及其ID。"
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=usage)
+        return
+    
+    try:
+        memory_id = int(context.args[0])
+        user_id = str(update.effective_chat.id)
+        
+        # 尝试删除记忆
+        success = await forget_memory(user_id, memory_id)
+        
+        if success:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id, 
+                text=f"我已经忘记了ID为 {memory_id} 的记忆。"
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id, 
+                text=f"我找不到ID为 {memory_id} 的记忆，或者删除失败。"
+            )
+    except ValueError:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id, 
+            text="记忆ID必须是一个数字。使用 /memories 命令查看所有记忆及其ID。"
+        )
+
+@decorators.GroupAuthorization
+@decorators.Authorization
+@decorators.APICheck
+async def summarize_memory(update, context):
+    """强制总结当前对话记忆"""
+    chatid = update.effective_chat.id
+    user_id = str(chatid)
+    
+    # 发送处理中消息
+    processing_message = await context.bot.send_message(
+        chat_id=chatid,
+        text="正在使用Gemini Flash总结当前对话历史并提取记忆，请稍候..."
+    )
+    
+    # 获取机器人实例
+    robot = config.ChatGPTbot
+    if not robot:
+        await context.bot.edit_message_text(
+            chat_id=chatid,
+            message_id=processing_message.message_id,
+            text="无法获取AI模型实例，请稍后再试。"
+        )
+        return
+    
+    # 执行强制总结
+    result = await force_summarize_memory(user_id, robot)
+    
+    # 发送结果
+    await context.bot.edit_message_text(
+        chat_id=chatid,
+        message_id=processing_message.message_id,
+        text=result
+    )
+
 if __name__ == '__main__':
     application = (
         ApplicationBuilder()
@@ -992,6 +1129,10 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("test_message", test_message))
     application.add_handler(CommandHandler("view_messages", view_messages))
     application.add_handler(CommandHandler("set_message_time", set_message_time))
+    application.add_handler(CommandHandler("remember", remember))
+    application.add_handler(CommandHandler("memories", memories))
+    application.add_handler(CommandHandler("forget", forget))
+    application.add_handler(CommandHandler("summarize_memory", summarize_memory))
     application.add_handler(InlineQueryHandler(inlinequery))
     application.add_handler(CallbackQueryHandler(button_press))
     application.add_handler(MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, lambda update, context: command_bot(update, context, prompt=None, has_command=False), block = False))

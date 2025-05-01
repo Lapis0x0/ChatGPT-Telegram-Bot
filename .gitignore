@@ -5,3 +5,6 @@ __pycache__/
 user_configs
 pyrightconfig.json
 docker-compose.yml
+
+# windsurf rules
+.windsurfrules
