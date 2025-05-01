@@ -445,6 +445,95 @@ async def send_test_message(context: ContextTypes.DEFAULT_TYPE, user_id=None):
     
     return f"已发送测试消息给用户 {user_id}"
 
+# 查看当前已计划的触发器
+async def view_planned_messages():
+    """查看当前已计划的触发器"""
+    result = "当前已计划的消息时间：\n\n"
+    
+    # 获取管理员ID列表
+    admin_ids = get_admin_ids()
+    
+    # 检查是否有规划的消息
+    has_plans = False
+    for user_id in admin_ids:
+        if user_id in planned_message_times and planned_message_times[user_id]:
+            has_plans = True
+            result += f"用户 {user_id} 的规划时间：\n"
+            for plan in planned_message_times[user_id]:
+                time_str = plan['time'].strftime('%H:%M')
+                reason = plan.get('reason', '未提供原因')
+                result += f"- {time_str} - {reason}\n"
+            result += "\n"
+    
+    if not has_plans:
+        result += "当前没有规划的消息时间。"
+    
+    return result
+
+# 手动指定触发时间
+async def set_custom_message_time(context: ContextTypes.DEFAULT_TYPE, user_id: str, time_str: str, reason: str = "用户手动设置"):
+    """手动指定触发时间
+    
+    参数:
+        context: Telegram上下文
+        user_id: 用户ID
+        time_str: 时间字符串，格式为"HH:MM"
+        reason: 设置该时间的原因
+    
+    返回:
+        str: 操作结果
+    """
+    try:
+        # 解析时间字符串
+        try:
+            hour, minute = map(int, time_str.split(':'))
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                return f"时间格式错误：小时必须在0-23之间，分钟必须在0-59之间。您输入的是 {hour}:{minute}"
+        except ValueError:
+            return f"时间格式错误：请使用HH:MM格式（例如14:30）。您输入的是 {time_str}"
+        
+        # 创建今天的目标时间
+        current_time = datetime.now()
+        target_time = current_time.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        
+        # 如果时间已经过去，返回错误
+        if target_time < current_time:
+            return f"无法设置已过去的时间：{time_str}"
+        
+        # 初始化该用户的计划列表
+        if user_id not in planned_message_times:
+            planned_message_times[user_id] = []
+            
+        # 计算延迟时间（秒）
+        delay = (target_time - current_time).total_seconds()
+        
+        # 创建任务名称
+        job_name = f"proactive_message_{user_id}_{hour}_{minute}"
+        
+        # 移除同名任务（如果存在）
+        remove_job_if_exists(job_name, context)
+        
+        # 添加新任务
+        context.job_queue.run_once(
+            lambda ctx: asyncio.ensure_future(send_proactive_message(ctx, user_id, reason)),
+            when=delay,
+            name=job_name
+        )
+        
+        # 保存到计划列表中
+        planned_message_times[user_id].append({
+            "time": target_time,
+            "reason": reason
+        })
+        
+        logging.info(f"已为用户 {user_id} 手动设置消息，时间: {target_time}，原因: {reason}")
+        
+        return f"已成功设置消息时间：{time_str}，原因：{reason}"
+        
+    except Exception as e:
+        logging.error(f"手动设置消息时间时出错: {str(e)}")
+        return f"设置消息时间失败：{str(e)}"
+
 # 初始化主动消息功能
 def init_proactive_messaging(application):
     """初始化主动消息功能"""

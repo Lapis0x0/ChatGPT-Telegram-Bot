@@ -886,6 +886,8 @@ async def post_init(application: Application) -> None:
         BotCommand('zh2en', 'Translate to English'),
         BotCommand('plan_messages', 'Plan proactive messages'),
         BotCommand('test_message', 'Send a test proactive message'),
+        BotCommand('view_messages', 'View planned messages'),
+        BotCommand('set_message_time', 'Set message time'),
     ])
     description = (
         "I am an Assistant, a large language model trained by OpenAI. I will do my best to help answer your questions."
@@ -912,6 +914,52 @@ async def test_message(update, context):
         await context.bot.send_message(chat_id=update.effective_chat.id, text="主动消息功能未启用")
         return
     result = await proactive_messaging.send_test_message(context, str(update.effective_chat.id))
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=result)
+
+@decorators.GroupAuthorization
+@decorators.Authorization
+@decorators.APICheck
+async def view_messages(update, context):
+    """查看当前已计划的触发器"""
+    if not proactive_messaging.PROACTIVE_AGENT_ENABLED:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="主动消息功能未启用")
+        return
+    result = await proactive_messaging.view_planned_messages()
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=result)
+
+@decorators.GroupAuthorization
+@decorators.Authorization
+@decorators.APICheck
+async def set_message_time(update, context):
+    """手动设置消息触发时间"""
+    if not proactive_messaging.PROACTIVE_AGENT_ENABLED:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="主动消息功能未启用")
+        return
+    
+    # 检查参数
+    args = context.args
+    if not args or len(args) < 1:
+        usage = (
+            "使用方法: /set_message_time HH:MM [原因]\n\n"
+            "例如:\n"
+            "/set_message_time 14:30 下午茶时间聊天\n"
+            "/set_message_time 18:45 晚餐提醒"
+        )
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=usage)
+        return
+    
+    # 解析参数
+    time_str = args[0]
+    reason = " ".join(args[1:]) if len(args) > 1 else "用户手动设置"
+    
+    # 设置消息时间
+    result = await proactive_messaging.set_custom_message_time(
+        context=context,
+        user_id=str(update.effective_chat.id),
+        time_str=time_str,
+        reason=reason
+    )
+    
     await context.bot.send_message(chat_id=update.effective_chat.id, text=result)
 
 if __name__ == '__main__':
@@ -942,6 +990,8 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("zh2en", lambda update, context: command_bot(update, context, "english")))
     application.add_handler(CommandHandler("plan_messages", plan_messages))
     application.add_handler(CommandHandler("test_message", test_message))
+    application.add_handler(CommandHandler("view_messages", view_messages))
+    application.add_handler(CommandHandler("set_message_time", set_message_time))
     application.add_handler(InlineQueryHandler(inlinequery))
     application.add_handler(CallbackQueryHandler(button_press))
     application.add_handler(MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, lambda update, context: command_bot(update, context, prompt=None, has_command=False), block = False))
