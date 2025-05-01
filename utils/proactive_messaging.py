@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import asyncio
 import re
 import datetime as dt
+import pytz  # 添加pytz库用于时区转换
 
 from telegram.ext import ContextTypes
 from config import Users, get_robot, GOOGLE_AI_API_KEY, ChatGPTbot
@@ -15,7 +16,7 @@ PROACTIVE_AGENT_ENABLED = os.environ.get('PROACTIVE_AGENT_ENABLED', 'False') == 
 ADMIN_LIST = os.environ.get('ADMIN_LIST', '')
 PROACTIVE_AGENT_SYSTEM_PROMPT = os.environ.get('PROACTIVE_AGENT_SYSTEM_PROMPT', 
 """你是一个主动沟通的助手。你的任务是：
-1. 每天决定5-6个适合的时间点，在这些时间点主动与用户沟通
+1. 每天决定3-4个适合的时间点，在这些时间点主动与用户沟通
 2. 根据用户的历史对话和兴趣，生成有价值、有趣的消息
 3. 避免在不适当的时间（如深夜）打扰用户
 4. 你的消息应该有目的性，可以是：分享知识、提醒事项、询问进展、推荐内容等
@@ -25,6 +26,14 @@ PROACTIVE_AGENT_MODEL = os.environ.get('PROACTIVE_AGENT_MODEL', '')  # 指定主
 
 # 存储计划的消息时间
 planned_message_times = {}
+
+# 定义东八区时区
+CHINA_TZ = pytz.timezone('Asia/Shanghai')
+
+# 获取东八区当前时间
+def get_china_time():
+    """获取中国时区（东八区）的当前时间"""
+    return datetime.now(pytz.UTC).astimezone(CHINA_TZ)
 
 # 获取管理员列表
 def get_admin_ids():
@@ -73,7 +82,7 @@ async def get_ai_response(user_id, message, system_prompt, save_to_history=True,
         temp_convo_id = str(user_id)
         if not save_to_history:
             # 使用临时对话ID，避免污染主对话
-            temp_convo_id = f"proactive_planning_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            temp_convo_id = f"proactive_planning_{user_id}_{get_china_time().strftime('%Y%m%d%H%M%S')}"
         
         # 添加用户消息到对话历史
         robot.add_to_conversation(message, "user", temp_convo_id)
@@ -140,9 +149,9 @@ async def plan_daily_messages(context: ContextTypes.DEFAULT_TYPE):
             planned_message_times[user_id] = []
             
         # 构建提示词，让AI决定今天的消息时间
-        current_date = datetime.now().strftime('%Y-%m-%d')
+        current_date = get_china_time().strftime('%Y-%m-%d')
         planning_prompt = f"""
-        基于当前日期（{current_date}），请决定今天应该在哪5-6个时间点发送消息。
+        基于当前日期（{current_date}），请决定今天应该在哪3-4个时间点发送消息。
         考虑用户可能的作息时间，避免在不适当的时间（如深夜）打扰用户。
         
         你必须严格按照以下JSON格式返回，不要添加任何其他解释或文字：
@@ -185,7 +194,7 @@ async def plan_daily_messages(context: ContextTypes.DEFAULT_TYPE):
             
             # 为每个时间点安排任务
             scheduled_count = 0
-            current_time = datetime.now()
+            current_time = get_china_time()
             
             for time_slot in message_times:
                 try:
@@ -194,7 +203,7 @@ async def plan_daily_messages(context: ContextTypes.DEFAULT_TYPE):
                     reason = time_slot.get("reason", "未提供原因")
                     
                     # 创建今天的目标时间
-                    target_time = datetime.now().replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    target_time = get_china_time().replace(hour=hour, minute=minute, second=0, microsecond=0)
                     
                     # 如果时间已经过去，跳过
                     if target_time < current_time:
@@ -337,7 +346,7 @@ async def send_proactive_message(context: ContextTypes.DEFAULT_TYPE, user_id: st
             user_id=user_id,
             reason=reason,
             system_prompt=PROACTIVE_AGENT_SYSTEM_PROMPT,
-            save_to_history=False,  # 不保存这个生成过程到用户的对话历史
+            save_to_history=True,  # 改为True，保存到用户的对话历史
             model=PROACTIVE_AGENT_MODEL  # 使用指定的模型
         )
         
@@ -351,18 +360,22 @@ async def send_proactive_message(context: ContextTypes.DEFAULT_TYPE, user_id: st
             text=message_content
         )
         
-        # 将这条消息添加到对话历史中，但不影响正常对话流程
+        # 将这条消息添加到用户的主对话历史中
         try:
             robot, role, api_key, api_url = get_robot(str(user_id))
             
-            # 创建一个临时的对话ID，避免干扰主对话
-            temp_convo_id = f"proactive_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            # 使用用户的主对话ID，而不是临时ID
+            main_convo_id = str(user_id)
             
-            # 在临时对话中添加消息
-            robot.add_to_conversation("请和我聊天", "user", temp_convo_id)
-            robot.add_to_conversation(message_content, "assistant", temp_convo_id)
+            # 在主对话中添加一个隐式的用户请求和机器人的回复
+            # 这样可以维持对话的自然流动性
+            implicit_request = "我希望你主动和我聊天"  # 隐式请求，表示用户希望聊天
             
-            logging.info(f"已发送主动消息给用户 {user_id}")
+            # 添加到用户的主对话历史
+            robot.add_to_conversation(implicit_request, "user", main_convo_id)
+            robot.add_to_conversation(message_content, "assistant", main_convo_id)
+            
+            logging.info(f"已发送主动消息给用户 {user_id} 并加入到主对话历史")
         except Exception as e:
             logging.error(f"保存主动消息到历史记录失败: {str(e)}")
         
@@ -370,16 +383,23 @@ async def send_proactive_message(context: ContextTypes.DEFAULT_TYPE, user_id: st
         logging.error(f"发送主动消息失败: {str(e)}")
 
 # 生成消息内容
-async def generate_message_content(user_id, reason, system_prompt, save_to_history=False, model=None):
+async def generate_message_content(user_id, reason, system_prompt, save_to_history=True, model=None):
     """生成主动消息的内容"""
     try:
-        # 构建提示词
+        # 构建提示词，使其更适合虚拟伴侣场景
         prompt = f"""
-        请根据以下原因生成一条主动消息：
+        请根据以下情境生成一条自然的主动消息：
         {reason}
         
-        消息应该自然、友好，不要过于机械，也不要提及这是一条自动生成的消息。
-        消息长度应该适中，不要太长也不要太短。
+        要求：
+        1. 消息应该自然、友好，就像真实的对话伙伴主动发起的聊天一样
+        2. 不要过于机械或客套，要有个性和情感
+        3. 不要提及这是一条自动生成的消息或你是AI助手
+        4. 消息长度应该适中，不要太长也不要太短
+        5. 可以适当加入一些表情符号增加亲近感
+        6. 如果可能，可以基于之前的对话内容创造连贯性
+        
+        请直接给出消息内容，不要加引号或前缀。
         """
         
         # 调用AI获取响应
@@ -394,12 +414,12 @@ async def generate_message_content(user_id, reason, system_prompt, save_to_histo
         # 确保响应不为空
         if not response or not response.strip():
             logging.warning(f"生成的消息内容为空，将使用默认消息")
-            return f"嗨，我想和你聊聊天。{reason}"
+            return f"嗨，我在想你，所以来找你聊聊天~ {reason}"
             
         return response.strip()
     except Exception as e:
         logging.error(f"生成消息内容失败: {str(e)}")
-        return f"嗨，我想和你聊聊天。{reason}"
+        return f"嗨，我在想你，所以来找你聊聊天~ {reason}"
 
 # 手动触发消息规划（用于测试）
 async def trigger_message_planning(context: ContextTypes.DEFAULT_TYPE):
@@ -474,13 +494,13 @@ async def view_planned_messages():
 async def set_custom_message_time(context: ContextTypes.DEFAULT_TYPE, user_id: str, time_str: str, reason: str = "用户手动设置"):
     """手动指定触发时间
     
-    参数:
+    参数：
         context: Telegram上下文
         user_id: 用户ID
         time_str: 时间字符串，格式为"HH:MM"
         reason: 设置该时间的原因
     
-    返回:
+    返回：
         str: 操作结果
     """
     try:
@@ -493,7 +513,7 @@ async def set_custom_message_time(context: ContextTypes.DEFAULT_TYPE, user_id: s
             return f"时间格式错误：请使用HH:MM格式（例如14:30）。您输入的是 {time_str}"
         
         # 创建今天的目标时间
-        current_time = datetime.now()
+        current_time = get_china_time()
         target_time = current_time.replace(hour=hour, minute=minute, second=0, microsecond=0)
         
         # 如果时间已经过去，返回错误
