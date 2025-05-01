@@ -8,7 +8,7 @@ import re
 import datetime as dt
 
 from telegram.ext import ContextTypes
-from config import Users, get_robot
+from config import Users, get_robot, GOOGLE_AI_API_KEY, ChatGPTbot
 
 # 配置项
 PROACTIVE_AGENT_ENABLED = os.environ.get('PROACTIVE_AGENT_ENABLED', 'False') == 'True'
@@ -44,18 +44,31 @@ def get_admin_ids():
 async def get_ai_response(user_id, message, system_prompt, save_to_history=True, model=None):
     """调用AI获取响应"""
     # get_robot() 返回的是一个元组 (robot, role, api_key, api_url)
-    robot, role, api_key, api_url = get_robot(str(user_id))
-    response = ""
-    
-    # 使用指定的模型，如果未指定则使用默认模型
+    # 确保使用指定的模型，如果未指定则使用默认模型
     model_name = model or PROACTIVE_AGENT_MODEL or None
+    
+    # 确保模型名称正确设置
+    if model_name and "gemini" in model_name:
+        # 强制使用 GOOGLE_AI_API_KEY
+        if not GOOGLE_AI_API_KEY:
+            logging.error("未设置 GOOGLE_AI_API_KEY，无法使用 Gemini 模型")
+            return "未设置 GOOGLE_AI_API_KEY，无法使用 Gemini 模型"
+        
+        robot = ChatGPTbot
+        api_key = GOOGLE_AI_API_KEY
+        api_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:streamGenerateContent?key={api_key}"
+        role = "user"
+    else:
+        # 使用常规方式获取机器人
+        robot, role, api_key, api_url = get_robot(str(user_id))
+    
+    response = ""
     
     try:
         # 确保消息不为空
         if not message or not message.strip():
             raise ValueError("消息内容为空")
             
-        # 如果需要保存到历史记录，先添加用户消息
         # 创建一个临时的对话ID，避免干扰主对话
         temp_convo_id = str(user_id)
         if not save_to_history:
@@ -70,7 +83,9 @@ async def get_ai_response(user_id, message, system_prompt, save_to_history=True,
             message, 
             convo_id=temp_convo_id, 
             system_prompt=system_prompt,
-            model=model_name
+            model=model_name,
+            api_key=api_key,
+            api_url=api_url
         ):
             if isinstance(data, str):
                 response += data
@@ -82,7 +97,7 @@ async def get_ai_response(user_id, message, system_prompt, save_to_history=True,
         return response
     except Exception as e:
         logging.error(f"调用AI获取响应失败: {str(e)}")
-        return "无法获取AI响应，请稍后再试。"
+        return f"无法获取AI响应，请稍后再试。错误: {str(e)}"
 
 # 移除指定的任务
 def remove_job_if_exists(name, context):
