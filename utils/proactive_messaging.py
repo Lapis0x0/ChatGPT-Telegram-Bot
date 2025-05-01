@@ -15,7 +15,7 @@ PROACTIVE_AGENT_ENABLED = os.environ.get('PROACTIVE_AGENT_ENABLED', 'False') == 
 ADMIN_LIST = os.environ.get('ADMIN_LIST', '')
 PROACTIVE_AGENT_SYSTEM_PROMPT = os.environ.get('PROACTIVE_AGENT_SYSTEM_PROMPT', 
 """你是一个主动沟通的助手。你的任务是：
-1. 每天决定2-3个适合的时间点，在这些时间点主动与用户沟通
+1. 每天决定5-6个适合的时间点，在这些时间点主动与用户沟通
 2. 根据用户的历史对话和兴趣，生成有价值、有趣的消息
 3. 避免在不适当的时间（如深夜）打扰用户
 4. 你的消息应该有目的性，可以是：分享知识、提醒事项、询问进展、推荐内容等
@@ -142,7 +142,7 @@ async def plan_daily_messages(context: ContextTypes.DEFAULT_TYPE):
         # 构建提示词，让AI决定今天的消息时间
         current_date = datetime.now().strftime('%Y-%m-%d')
         planning_prompt = f"""
-        基于当前日期（{current_date}），请决定今天应该在哪2-3个时间点发送消息。
+        基于当前日期（{current_date}），请决定今天应该在哪5-6个时间点发送消息。
         考虑用户可能的作息时间，避免在不适当的时间（如深夜）打扰用户。
         
         你必须严格按照以下JSON格式返回，不要添加任何其他解释或文字：
