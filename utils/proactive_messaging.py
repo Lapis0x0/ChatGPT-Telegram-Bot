@@ -51,15 +51,34 @@ async def get_ai_response(user_id, message, system_prompt, save_to_history=True,
     model_name = model or PROACTIVE_AGENT_MODEL or None
     
     try:
+        # 确保消息不为空
+        if not message or not message.strip():
+            raise ValueError("消息内容为空")
+            
+        # 如果需要保存到历史记录，先添加用户消息
+        # 创建一个临时的对话ID，避免干扰主对话
+        temp_convo_id = str(user_id)
+        if not save_to_history:
+            # 使用临时对话ID，避免污染主对话
+            temp_convo_id = f"proactive_planning_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        
+        # 添加用户消息到对话历史
+        robot.add_to_conversation(message, "user", temp_convo_id)
+            
+        # 调用AI获取响应
         async for data in robot.ask_stream_async(
             message, 
-            convo_id=str(user_id), 
+            convo_id=temp_convo_id, 
             system_prompt=system_prompt,
             model=model_name
         ):
             if isinstance(data, str):
                 response += data
         
+        # 确保响应不为空
+        if not response or not response.strip():
+            raise ValueError("AI返回的响应为空")
+            
         return response
     except Exception as e:
         logging.error(f"调用AI获取响应失败: {str(e)}")
@@ -307,18 +326,30 @@ async def send_proactive_message(context: ContextTypes.DEFAULT_TYPE, user_id: st
             model=PROACTIVE_AGENT_MODEL  # 使用指定的模型
         )
         
+        # 确保消息内容不为空
+        if not message_content or not message_content.strip():
+            message_content = f"嗨，我想和你聊聊天。{reason}"
+        
         # 发送消息给用户
         sent_message = await context.bot.send_message(
             chat_id=user_id, 
             text=message_content
         )
         
-        # 将这条消息添加到对话历史中
-        # 这里我们直接使用robot的方法来添加消息到历史
-        robot, role, api_key, api_url = get_robot(str(user_id))
-        robot.add_to_history(str(user_id), "assistant", message_content)
-        
-        logging.info(f"已发送主动消息给用户 {user_id}")
+        # 将这条消息添加到对话历史中，但不影响正常对话流程
+        try:
+            robot, role, api_key, api_url = get_robot(str(user_id))
+            
+            # 创建一个临时的对话ID，避免干扰主对话
+            temp_convo_id = f"proactive_{user_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            
+            # 在临时对话中添加消息
+            robot.add_to_conversation("请和我聊天", "user", temp_convo_id)
+            robot.add_to_conversation(message_content, "assistant", temp_convo_id)
+            
+            logging.info(f"已发送主动消息给用户 {user_id}")
+        except Exception as e:
+            logging.error(f"保存主动消息到历史记录失败: {str(e)}")
         
     except Exception as e:
         logging.error(f"发送主动消息失败: {str(e)}")
@@ -341,10 +372,15 @@ async def generate_message_content(user_id, reason, system_prompt, save_to_histo
             user_id=user_id,
             message=prompt,
             system_prompt=system_prompt,
-            save_to_history=save_to_history,
+            save_to_history=save_to_history,  
             model=model
         )
         
+        # 确保响应不为空
+        if not response or not response.strip():
+            logging.warning(f"生成的消息内容为空，将使用默认消息")
+            return f"嗨，我想和你聊聊天。{reason}"
+            
         return response.strip()
     except Exception as e:
         logging.error(f"生成消息内容失败: {str(e)}")
