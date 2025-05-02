@@ -33,12 +33,37 @@ async def process_structured_messages(message_content, context, chat_id, message
             logging.info("检测到消息以'json'开头")
             is_json_prefix = True
             json_content = message_content.strip()[4:].strip()  # 移除"json"前缀
+            
             try:
+                # 尝试直接解析
                 json_data = json.loads(json_content)
                 logging.info("成功从'json'前缀消息中解析JSON数据")
             except json.JSONDecodeError as e:
                 logging.warning(f"从'json'前缀消息解析JSON失败: {str(e)}")
-                json_data = None
+                
+                # 尝试清理JSON字符串
+                try:
+                    # 查找最后一个有效的JSON结构
+                    # 通常JSON结构以}结束，后面可能有额外字符
+                    last_brace_index = json_content.rfind('}')
+                    if last_brace_index > 0:
+                        # 查找匹配的开始括号
+                        first_brace_index = json_content.find('{')
+                        if first_brace_index >= 0 and first_brace_index < last_brace_index:
+                            # 提取可能有效的JSON部分
+                            potential_json = json_content[first_brace_index:last_brace_index+1]
+                            logging.info(f"尝试清理后的JSON: {potential_json[:100]}...")
+                            
+                            # 尝试解析清理后的JSON
+                            json_data = json.loads(potential_json)
+                            logging.info("成功从清理后的JSON中解析数据")
+                        else:
+                            json_data = None
+                    else:
+                        json_data = None
+                except json.JSONDecodeError as e2:
+                    logging.warning(f"清理后的JSON解析仍然失败: {str(e2)}")
+                    json_data = None
         else:
             json_data = None
         
@@ -170,12 +195,45 @@ async def process_structured_messages(message_content, context, chat_id, message
             # 等待延迟时间
             await asyncio.sleep(delay)
             
-            # 发送消息，回复上一条消息
+            # 发送消息，使用更复杂的随机逻辑决定是否回复前一条消息
+            # 考虑多种因素：消息位置、消息长度、完全随机因素
+            
+            # 基础随机概率 - 完全随机因素
+            base_probability = random.random()
+            
+            # 位置因素 - 相邻消息更可能有回复关系，但不是固定的
+            position_factor = 0.0
+            if i == 1:  # 第二条消息
+                position_factor = 0.2  # 第二条消息有额外20%概率回复第一条
+            elif i == len(messages) - 1:  # 最后一条消息
+                position_factor = -0.1  # 最后一条消息更可能独立
+            
+            # 长度因素 - 短消息更可能是对前面内容的回应
+            length_factor = 0.0
+            if content_length < 30:  # 非常短的消息
+                length_factor = 0.15  # 短消息更可能是回复
+            elif content_length > 200:  # 长消息
+                length_factor = -0.1  # 长消息更可能独立
+            
+            # 内容启发式判断 - 如果消息以问号开头或结尾，更可能是回复
+            content_factor = 0.0
+            if msg['content'].strip().startswith('?') or msg['content'].strip().endswith('?'):
+                content_factor = 0.15
+            
+            # 计算最终概率 - 基础概率在25%-45%之间浮动
+            final_probability = 0.35 + position_factor + length_factor + content_factor
+            
+            # 随机决定是否回复
+            should_reply = base_probability < final_probability
+            
+            # 记录日志
+            logging.info(f"消息{i+1}回复决策: 基础概率={base_probability:.2f}, 最终概率={final_probability:.2f}, 是否回复={should_reply}")
+            
             sent_message = await context.bot.send_message(
                 chat_id=chat_id,
                 message_thread_id=message_thread_id,
                 text=msg['content'],
-                reply_to_message_id=last_message_id if i == 1 else None  # 只有第二条消息回复第一条
+                reply_to_message_id=last_message_id if should_reply else None  # 根据复杂随机逻辑决定是否回复
             )
             
             last_message_id = sent_message.message_id
@@ -247,5 +305,5 @@ json {
 3. 模拟思考过程
 4. 自然的对话节奏转换
 
-请根据对话内容自行判断是否需要使用此功能。
+请根据对话内容自行判断是否需要使用此功能，如果只是正常的、简单的日常聊天对话，那么请不要使用此功能。
 """
