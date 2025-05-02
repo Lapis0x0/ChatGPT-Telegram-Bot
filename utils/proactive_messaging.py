@@ -7,6 +7,7 @@ import asyncio
 import re
 import datetime as dt
 import pytz  # 添加pytz库用于时区转换
+import traceback  # 添加traceback模块用于详细错误信息
 
 from telegram.ext import ContextTypes
 from config import Users, get_robot, GOOGLE_AI_API_KEY, ChatGPTbot
@@ -15,7 +16,8 @@ from config import Users, get_robot, GOOGLE_AI_API_KEY, ChatGPTbot
 PROACTIVE_AGENT_ENABLED = os.environ.get('PROACTIVE_AGENT_ENABLED', 'false').lower() == 'true'
 PROACTIVE_AGENT_MODEL = os.environ.get('PROACTIVE_AGENT_MODEL', 'gemini-2.5-flash-preview-04-17')
 PROACTIVE_DESIRE_THRESHOLD = float(os.environ.get('PROACTIVE_DESIRE_THRESHOLD', '0.7'))
-PROACTIVE_DESIRE_DECAY_RATE = float(os.environ.get('PROACTIVE_DESIRE_DECAY_RATE', '0.01'))
+# 修改：欲望值增长率（每小时）
+PROACTIVE_DESIRE_GROWTH_RATE = float(os.environ.get('PROACTIVE_DESIRE_GROWTH_RATE', '0.15'))
 ADMIN_LIST = os.environ.get('ADMIN_LIST', '')
 
 # 连续对话配置
@@ -24,6 +26,9 @@ CONTINUOUS_MESSAGE_DELAY = int(os.environ.get('CONTINUOUS_MESSAGE_DELAY', '30'))
 
 # 主动对话欲望值（用户ID -> 欲望值）
 proactive_desire = {}
+
+# 添加：用户最后对话时间（用户ID -> 最后对话时间）
+last_user_chat_time = {}
 
 # 定义东八区时区
 CHINA_TZ = pytz.timezone('Asia/Shanghai')
@@ -50,6 +55,7 @@ def init_proactive_desire(user_id):
     if user_id not in proactive_desire:
         proactive_desire[user_id] = float(os.environ.get('INITIAL_PROACTIVE_DESIRE', '0.2'))
         last_desire_check_time[user_id] = get_china_time()
+        last_user_chat_time[user_id] = get_china_time()  # 初始化最后对话时间
         logging.info(f"初始化用户 {user_id} 的主动对话欲望为 {proactive_desire[user_id]}")
 
 # 增加主动对话欲望
@@ -66,93 +72,47 @@ def decrease_proactive_desire(user_id, amount):
     proactive_desire[user_id] = max(proactive_desire[user_id] - amount, PROACTIVE_DESIRE_MIN)
     logging.info(f"减少用户 {user_id} 的主动对话欲望 {amount}，当前值: {proactive_desire[user_id]}")
 
-# 应用主动对话欲望衰减
+# 应用主动对话欲望增长（基于聊天空窗期）
 def apply_desire_decay(user_id: str):
-    """应用主动对话欲望衰减"""
-    # 获取上次检查时间
-    last_check = last_desire_check_time.get(user_id, datetime.now(CHINA_TZ) - timedelta(minutes=DESIRE_CHECK_INTERVAL))
+    """应用主动对话欲望增长（基于聊天空窗期）"""
+    # 获取当前时间
+    current_time = get_china_time()
     
-    # 计算时间差（分钟）
-    time_diff = (datetime.now(CHINA_TZ) - last_check).total_seconds() / 60
+    # 获取上次对话时间
+    last_chat = last_user_chat_time.get(user_id, current_time - timedelta(hours=1))
     
-    # 如果时间差小于检查间隔，跳过
-    if time_diff < DESIRE_CHECK_INTERVAL:
-        return
+    # 计算时间差（小时）
+    time_diff_hours = (current_time - last_chat).total_seconds() / 3600
     
     # 更新上次检查时间
-    last_desire_check_time[user_id] = datetime.now(CHINA_TZ)
+    last_desire_check_time[user_id] = current_time
     
-    # 计算衰减量（每分钟衰减）
-    decay_amount = PROACTIVE_DESIRE_DECAY_RATE * time_diff / (24 * 60)  # 按比例计算
+    # 计算增长量（每小时增长）
+    growth_amount = PROACTIVE_DESIRE_GROWTH_RATE * time_diff_hours
     
-    # 应用衰减
-    decrease_proactive_desire(user_id, decay_amount)
+    # 应用增长
+    increase_proactive_desire(user_id, growth_amount)
+    
+    logging.info(f"用户 {user_id} 已有 {time_diff_hours:.2f} 小时未对话，增加主动对话欲望 {growth_amount:.4f}，当前值: {proactive_desire[user_id]}")
 
 # 分析消息内容，调整主动对话欲望
 async def analyze_message_for_desire(user_id, message_content):
-    """分析消息内容，调整主动对话欲望"""
+    """记录用户对话时间并重置主动对话欲望"""
     try:
-        # 构建提示词
-        prompt = f"""
-        分析以下用户消息，评估我是否应该增加或减少与用户主动对话的欲望。
+        # 初始化用户的主动对话欲望（如果不存在）
+        init_proactive_desire(user_id)
         
-        用户消息: "{message_content}"
+        # 更新最后对话时间
+        last_user_chat_time[user_id] = get_china_time()
         
-        请根据以下标准评估:
-        1. 如果用户表达了希望继续交流的兴趣，应增加主动对话欲望
-        2. 如果用户表达了不想被打扰的意愿，应减少主动对话欲望
-        3. 如果用户提出了问题或表达了好奇心，应增加主动对话欲望
-        4. 如果用户回应简短或敷衍，应减少主动对话欲望
-        5. 如果用户分享了个人经历或情感，应增加主动对话欲望
+        # 重置主动对话欲望（用户刚刚对话，不需要主动发起对话）
+        proactive_desire[user_id] = float(os.environ.get('RESET_PROACTIVE_DESIRE', '0.1'))
         
-        请仅返回一个JSON格式的结果:
-        {{
-            "adjustment": 浮点数(-0.2到0.2之间),
-            "reason": "调整原因的简短解释"
-        }}
+        logging.info(f"用户 {user_id} 刚刚对话，重置主动对话欲望为 {proactive_desire[user_id]}")
         
-        正数表示增加主动对话欲望，负数表示减少主动对话欲望。
-        """
-        
-        # 调用AI分析，强制使用Gemini模型
-        gemini_model = "gemini-2.5-pro-preview-03-25"  # 使用Gemini模型
-        response = await get_ai_response(
-            user_id=user_id,
-            message=prompt,
-            system_prompt="你是一个分析用户意图和情感的助手，你的任务是判断是否应该增加或减少与用户的主动交流频率。",
-            save_to_history=False,
-            model=gemini_model
-        )
-        
-        # 解析响应
-        try:
-            # 提取JSON部分
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(0)
-                result = json.loads(json_str)
-                
-                adjustment = float(result.get("adjustment", 0))
-                # 限制调整范围
-                adjustment = max(min(adjustment, 0.2), -0.2)
-                
-                if adjustment > 0:
-                    increase_proactive_desire(user_id, adjustment)
-                elif adjustment < 0:
-                    decrease_proactive_desire(user_id, abs(adjustment))
-                
-                logging.info(f"分析用户 {user_id} 消息后调整主动对话欲望: {adjustment}, 原因: {result.get('reason', '未提供')}")
-                return adjustment
-            else:
-                logging.warning(f"无法从AI响应中提取JSON: {response}")
-                return 0
-        except Exception as e:
-            logging.error(f"解析AI响应时出错: {str(e)}, 响应: {response}")
-            return 0
-            
     except Exception as e:
-        logging.error(f"分析消息调整主动对话欲望时出错: {str(e)}")
-        return 0
+        logging.error(f"更新用户 {user_id} 的对话时间时出错: {str(e)}")
+        traceback.print_exc()
 
 # 检查是否应该发送主动消息
 async def check_proactive_desire(context: ContextTypes.DEFAULT_TYPE):
@@ -169,7 +129,7 @@ async def check_proactive_desire(context: ContextTypes.DEFAULT_TYPE):
         # 遍历所有用户的主动对话欲望
         for user_id in admin_ids:
             try:
-                # 应用欲望衰减
+                # 应用基于聊天空窗期的欲望增长
                 apply_desire_decay(user_id)
                 
                 # 获取用户的主动对话欲望
@@ -820,25 +780,23 @@ def init_proactive_messaging(application):
         name="proactive_desire_check"
     )
     
-    # 设置定期衰减主动对话欲望的任务
+    # 设置定期增长主动对话欲望的任务（基于聊天空窗期）
     application.job_queue.run_repeating(
         decay_proactive_desire,
-        interval=3600,  # 每小时衰减一次
+        interval=1800,  # 每30分钟检查一次
         first=10,
-        name="proactive_desire_decay"
+        name="proactive_desire_growth"
     )
     
     logging.info("主动消息功能初始化完成")
 
-# 定期衰减所有用户的主动对话欲望
+# 定期增长所有用户的主动对话欲望（基于聊天空窗期）
 async def decay_proactive_desire(context: ContextTypes.DEFAULT_TYPE):
-    """定期衰减所有用户的主动对话欲望"""
+    """定期增长所有用户的主动对话欲望（基于聊天空窗期）"""
     for user_id in list(proactive_desire.keys()):
         try:
-            # 计算衰减量
-            decay_amount = proactive_desire[user_id] * PROACTIVE_DESIRE_DECAY_RATE
-            # 应用衰减
-            decrease_proactive_desire(user_id, decay_amount)
-            logging.info(f"已衰减用户 {user_id} 的主动对话欲望，当前值: {proactive_desire[user_id]}")
+            # 应用基于聊天空窗期的欲望增长
+            apply_desire_decay(user_id)
         except Exception as e:
-            logging.error(f"衰减用户 {user_id} 的主动对话欲望时出错: {str(e)}")
+            logging.error(f"增长用户 {user_id} 的主动对话欲望时出错: {str(e)}")
+            traceback.print_exc()
