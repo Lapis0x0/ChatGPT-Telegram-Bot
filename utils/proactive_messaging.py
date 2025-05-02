@@ -11,6 +11,7 @@ import traceback  # 添加traceback模块用于详细错误信息
 
 from telegram.ext import ContextTypes
 from config import Users, get_robot, GOOGLE_AI_API_KEY, ChatGPTbot
+from utils.message_splitter import process_structured_messages
 
 # 配置项
 PROACTIVE_AGENT_ENABLED = os.environ.get('PROACTIVE_AGENT_ENABLED', 'false').lower() == 'true'
@@ -215,8 +216,16 @@ async def send_proactive_message(context: ContextTypes.DEFAULT_TYPE, user_id: st
             logging.error(f"无法为用户 {user_id} 生成主动消息")
             return
         
-        # 发送消息
-        await context.bot.send_message(chat_id=user_id, text=message_content)
+        # 处理结构化消息，检查是否需要拆分发送
+        processed_result = await process_structured_messages(
+            message_content, 
+            context, 
+            user_id
+        )
+        
+        # 如果处理后的结果不为空字符串，说明消息没有被拆分发送，使用普通方式发送
+        if processed_result != "":
+            await context.bot.send_message(chat_id=user_id, text=processed_result)
         
         # 将消息保存到对话历史
         main_convo_id = str(user_id)
@@ -261,184 +270,162 @@ async def check_user_response(context: ContextTypes.DEFAULT_TYPE, user_id: str):
         last_bot_message = None
         
         if main_convo_id in robot.conversation:
-            # 获取最近的消息
-            recent_messages = robot.conversation[main_convo_id][-5:]  # 只看最近5条
-            
-            for msg in recent_messages:
-                if msg.get("role") == "user" and "我想和你聊聊天" not in msg.get("content", ""):
-                    last_user_message_time = msg.get("timestamp", datetime.now(CHINA_TZ) - timedelta(minutes=10))
-                elif msg.get("role") == "assistant":
-                    last_bot_message_time = msg.get("timestamp", datetime.now(CHINA_TZ))
-                    last_bot_message = msg.get("content", "")
-            
-            # 如果没有找到时间戳，使用默认值
-            if not last_user_message_time:
-                last_user_message_time = datetime.now(CHINA_TZ) - timedelta(minutes=10)
-            if not last_bot_message_time:
-                last_bot_message_time = datetime.now(CHINA_TZ) - timedelta(minutes=5)
-            
-            # 检查用户是否已回复（如果用户最后一条消息时间晚于机器人最后一条消息时间）
-            if last_user_message_time and last_bot_message_time and last_user_message_time > last_bot_message_time:
-                logging.info(f"用户 {user_id} 已回复，不需要发送连续消息")
-                return
-            
-            # 检查是否已经发送了最大数量的连续消息
-            continuous_count = 0
-            for i in range(len(recent_messages) - 1, -1, -1):
-                msg = recent_messages[i]
-                if msg.get("role") == "user" and "我想和你聊聊天" in msg.get("content", ""):
-                    continuous_count += 1
-                elif msg.get("role") == "user" and "我想和你聊聊天" not in msg.get("content", ""):
-                    # 遇到真实用户消息，停止计数
-                    break
-            
-            if continuous_count >= MAX_CONTINUOUS_MESSAGES:
-                logging.info(f"已达到最大连续消息数量 {MAX_CONTINUOUS_MESSAGES}，停止发送")
-                return
-            
-            # 提取最近的对话历史
-            recent_history = ""
-            conversation_history = []
-            last_message_time = None
-            
-            if main_convo_id in robot.conversation:
-                # 获取最近的对话（最多10轮，即20条消息）
-                recent_messages = robot.conversation[main_convo_id][-20:]
+            # 过滤掉系统消息和特殊指令
+            filtered_messages = []
+            for msg in robot.conversation[main_convo_id]:
+                role = msg.get("role", "")
+                content = msg.get("content", "")
                 
-                # 过滤掉系统消息和提示词
-                filtered_messages = []
-                for msg in recent_messages:
-                    role = msg.get("role", "")
-                    content = msg.get("content", "")
-                    
-                    # 排除系统消息和特定内容
-                    if (role in ["user", "assistant"] and 
-                        "我想和你聊聊天" not in content and 
-                        "我希望你主动和我聊天" not in content and 
-                        "我想继续和你聊天" not in content and
-                        "# 你的角色基本信息" not in content and 
-                        "当前日期和时间" not in content and
-                        "# 知识与能力设定" not in content and
-                        "# 语气与风格" not in content and
-                        "# 作为女朋友的部分" not in content and
-                        "# 用户的信息" not in content and
-                        content.strip()):
-                        filtered_messages.append(msg)
-                        # 记录最后一条消息的时间戳（如果有）
-                        if msg.get("timestamp"):
+                # 跳过系统消息
+                if role == "system":
+                    continue
+                
+                # 跳过特殊指令
+                if role == "user" and (
+                    content.startswith("/") or 
+                    "我想和你聊聊天" in content or 
+                    "我想继续和你聊天" in content
+                ):
+                    continue
+                
+                filtered_messages.append(msg)
+            
+            # 检查最后的消息
+            if filtered_messages:
+                # 获取最后一条消息的角色
+                last_message_role = filtered_messages[-1].get("role", "")
+                
+                # 如果最后一条是机器人消息，说明用户还没有回复
+                if last_message_role == "assistant":
+                    # 获取最后一条机器人消息的时间
+                    last_message_time = None
+                    for msg in reversed(filtered_messages):
+                        if msg.get("role") == "assistant":
                             last_message_time = msg.get("timestamp")
-            
-            # 确保我们有足够的上下文，但不超过模型的限制
-            # 通常保留最近的10条消息
-            filtered_messages = filtered_messages[-10:]
-            
-            # 构建文本形式的历史记录（用于提示词）
-            for msg in filtered_messages:
-                role_text = "用户" if msg.get("role") == "user" else "助手"
-                content = msg.get("content", "").strip()
-                if content:
-                    recent_history += f"{role_text}: {content}\n\n"
-            
-            # 构建API格式的历史记录（用于传递给模型）
-            conversation_history = [
-                {"role": msg.get("role"), "content": msg.get("content")}
-                for msg in filtered_messages
-            ]
-        
-        # 获取当前时间
-        current_time = get_china_time()
-        
-        # 构建提示词，使其更适合虚拟伴侣场景，并包含历史对话和时间信息
-        prompt = f"""
-        作为用户的虚拟伴侣Kami，我刚刚发送了以下消息给用户，但用户还没有回复：
-        "{last_bot_message}"
-        
-        当前时间：{get_china_time().strftime('%Y-%m-%d %H:%M')}
-        
-        最近的对话历史：
-        {recent_history}
-        
-        要求：
-        1. 消息应该符合你的角色设定：20岁女大学生，清冷、傲娇、略带毒舌
-        2. 不要过于机械或客套，要有个性和情感
-        3. 不要提及这是一条自动生成的消息或你是AI助手
-        4. 消息内容应该与最近的对话历史有连贯性，表现出你记得之前的交流
-        5. 如果用户之前提到了某个话题，可以自然地继续那个话题
-        6. 如果没有明显的话题可以继续，可以引入新话题，但要自然
-        7. 可以适当使用哲学术语或拉丁文表达内在感受
-        8. 记住用户是在备考法硕，最近喜欢玩Galgame
-        9. 重要：不要使用"昨天"、"前几天"等时间表述来引用刚刚的对话。所有历史对话都应该被视为最近发生的，除非明确指出。
-        
-        请返回JSON格式：
-        {{
-            "should_continue": true/false,
-            "reason": "决定原因",
-            "message": "如果应该继续，这里是后续消息内容"
-        }}
-        """
-        
-        # 获取系统提示词
-        system_prompt = Users.get_config(str(user_id), "systemprompt")
-        
-        # 添加当前东八区日期和时间
-        current_datetime = datetime.now(CHINA_TZ)
-        current_date = current_datetime.strftime("%Y-%m-%d")
-        current_time = current_datetime.strftime("%H:%M")
-        system_prompt = f"当前日期和时间（东八区）：{current_date} {current_time}\n\n{system_prompt}"
-        
-        # 获取AI回复
-        model = os.environ.get('PROACTIVE_AGENT_MODEL', 'gemini-2.5-flash-preview-04-17')
-        response = await get_ai_response(
-            user_id=user_id,
-            message=prompt,
-            system_prompt=system_prompt,
-            save_to_history=False,
-            model=model
-        )
-        
-        # 解析JSON响应
-        try:
-            # 尝试处理可能的Markdown格式
-            json_str = response
-            # 移除可能的Markdown代码块格式
-            if "```json" in json_str:
-                json_str = json_str.split("```json")[1].split("```")[0].strip()
-            elif "```" in json_str:
-                json_str = json_str.split("```")[1].split("```")[0].strip()
-            
-            result = json.loads(json_str)
-            should_continue = result.get("should_continue", False)
-            reason = result.get("reason", "")
-            message = result.get("message", "")
-            
-            if should_continue and message:
-                # 发送后续消息
-                await context.bot.send_message(chat_id=user_id, text=message)
-                
-                # 将消息保存到对话历史
-                if main_convo_id in robot.conversation:
-                    # 添加虚拟的用户消息，表示这是连续对话
-                    robot.add_to_conversation({"role": "user", "content": "我想继续和你聊天"}, main_convo_id)
-                    # 添加机器人的回复，并包含时间戳
-                    robot.add_to_conversation({
-                        "role": "assistant", 
-                        "content": message,
-                        "timestamp": str(datetime.now(CHINA_TZ).timestamp())
-                    }, main_convo_id)
+                            last_bot_message = msg.get("content", "")
+                            break
                     
-                    # 安排下一次检查
-                    context.job_queue.run_once(
-                        lambda ctx: asyncio.create_task(check_user_response(ctx, user_id)),
-                        CONTINUOUS_MESSAGE_DELAY,
-                        name=f"check_response_{user_id}"
-                    )
+                    # 获取最后一条用户消息的时间
+                    for msg in reversed(filtered_messages):
+                        if msg.get("role") == "user":
+                            last_user_message_time = msg.get("timestamp")
+                            break
                     
-                    logging.info(f"已发送连续消息给用户 {user_id}，原因: {reason}")
+                    # 如果找到了最后一条机器人消息的时间
+                    if last_message_time:
+                        # 计算时间差（分钟）
+                        current_time = get_china_time()
+                        last_message_datetime = datetime.fromtimestamp(last_message_time, CHINA_TZ)
+                        time_diff = (current_time - last_message_datetime).total_seconds() / 60
+                        
+                        logging.info(f"用户 {user_id} 的最后一条机器人消息发送于 {time_diff:.1f} 分钟前")
+                        
+                        # 如果时间差超过阈值且未超过最大连续消息数量，发送后续消息
+                        # 获取已发送的连续消息数量
+                        continuous_count = 0
+                        for msg in reversed(filtered_messages):
+                            if msg.get("role") == "user":
+                                break
+                            if msg.get("role") == "assistant":
+                                continuous_count += 1
+                        
+                        if time_diff >= 2 and continuous_count < MAX_CONTINUOUS_MESSAGES:
+                            # 生成后续消息
+                            logging.info(f"用户 {user_id} 在 {time_diff:.1f} 分钟内没有回复，尝试发送后续消息")
+                            
+                            # 提取最近的对话历史
+                            recent_history = ""
+                            for msg in filtered_messages[-10:]:
+                                role_text = "用户" if msg.get("role") == "user" else "助手"
+                                content = msg.get("content", "").strip()
+                                if content:
+                                    recent_history += f"{role_text}: {content}\n\n"
+                            
+                            # 构建API格式的历史记录（用于传递给模型）
+                            conversation_history = [
+                                {"role": msg.get("role"), "content": msg.get("content")}
+                                for msg in filtered_messages[-10:]
+                            ]
+                            
+                            # 构建提示词
+                            prompt = f"""
+                            我注意到用户在我上一条消息后没有回复。作为一个体贴的AI助手，我想发送一条后续消息来继续对话。
+
+                            请根据我们之前的对话历史，生成一条自然、有吸引力的后续消息。这条消息应该：
+                            1. 与我们之前的对话主题相关
+                            2. 展示出我在倾听并理解用户
+                            3. 可能提出一个相关的问题或分享一个相关的想法
+                            4. 不要显得太过急切或打扰用户
+
+                            最近的对话历史：
+                            {recent_history}
+
+                            我的上一条消息是：
+                            {last_bot_message}
+
+                            请生成一条自然的后续消息，保持对话的连贯性和吸引力。
+                            """
+                            
+                            # 获取系统提示词
+                            system_prompt = Users.get_config(str(user_id), "systemprompt")
+                            
+                            # 调用AI获取响应，传递对话历史
+                            response = await get_ai_response(
+                                user_id=user_id,
+                                message=prompt,
+                                system_prompt=system_prompt,
+                                save_to_history=False,  # 不保存这个提示到历史记录
+                                model=PROACTIVE_AGENT_MODEL,
+                                conversation_history=conversation_history
+                            )
+                            
+                            # 确保响应不为空
+                            if response and response.strip():
+                                # 处理结构化消息，检查是否需要拆分发送
+                                processed_result = await process_structured_messages(
+                                    response, 
+                                    context, 
+                                    user_id
+                                )
+                                
+                                # 如果处理后的结果不为空字符串，说明消息没有被拆分发送，使用普通方式发送
+                                if processed_result != "":
+                                    # 发送后续消息
+                                    await context.bot.send_message(chat_id=user_id, text=processed_result)
+                                
+                                # 将后续消息保存到对话历史
+                                if main_convo_id in robot.conversation:
+                                    robot.conversation[main_convo_id].append({
+                                        "role": "assistant",
+                                        "content": response,
+                                        "timestamp": datetime.now(CHINA_TZ).timestamp()
+                                    })
+                                
+                                logging.info(f"已向用户 {user_id} 发送后续消息")
+                                
+                                # 如果还没有达到最大连续消息数量，设置下一次检查
+                                if continuous_count + 1 < MAX_CONTINUOUS_MESSAGES:
+                                    context.job_queue.run_once(
+                                        lambda ctx: asyncio.ensure_future(check_user_response(ctx, user_id)),
+                                        when=timedelta(seconds=CONTINUOUS_MESSAGE_DELAY),  # 延迟后再次检查
+                                        name=f"check_response_{user_id}"
+                                    )
+                                    
+                                    logging.info(f"将在 {CONTINUOUS_MESSAGE_DELAY} 秒后再次检查用户 {user_id} 的回复")
+                            else:
+                                logging.warning(f"为用户 {user_id} 生成后续消息失败，内容为空")
+                        else:
+                            if continuous_count >= MAX_CONTINUOUS_MESSAGES:
+                                logging.info(f"用户 {user_id} 已达到最大连续消息数量 {MAX_CONTINUOUS_MESSAGES}，不再发送后续消息")
+                            else:
+                                logging.info(f"用户 {user_id} 的最后一条消息发送时间未超过阈值，不发送后续消息")
+                else:
+                    logging.info(f"用户 {user_id} 已回复，不需要发送后续消息")
             else:
-                logging.info(f"决定不发送连续消息给用户 {user_id}，原因: {reason}")
-        except json.JSONDecodeError:
-            logging.error(f"无法解析AI响应为JSON: {response}")
-        
+                logging.info(f"用户 {user_id} 没有有效的对话历史")
+        else:
+            logging.info(f"用户 {user_id} 没有对话历史")
+    
     except Exception as e:
         logging.error(f"检查用户回复时出错: {str(e)}")
         traceback.print_exc()

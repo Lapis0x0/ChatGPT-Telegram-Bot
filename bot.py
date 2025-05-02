@@ -8,6 +8,7 @@ import utils.decorators as decorators
 import utils.proactive_messaging as proactive_messaging
 from utils.memory_integration import process_memory, get_memory_enhanced_prompt, add_explicit_memory, list_memories, forget_memory, track_conversation, force_summarize_memory
 import utils.proactive_messaging as proactive_messaging
+from utils.message_splitter import process_structured_messages, get_structured_message_prompt
 
 from md2tgmd.src.md2tgmd import escape, split_code, replace_all
 from aient.src.aient.utils.prompt import translator_en2zh_prompt, translator_prompt
@@ -274,6 +275,10 @@ async def getChatGPT(update_message, context, title, robot, message, chatid, mes
     current_date = current_datetime.strftime("%Y-%m-%d")
     current_time = current_datetime.strftime("%H:%M")
     system_prompt = f"当前日期和时间（东八区）：{current_date} {current_time}\n\n{system_prompt}"
+    
+    # 添加结构化消息的提示词
+    structured_message_prompt = get_structured_message_prompt()
+    system_prompt = f"{system_prompt}\n\n{structured_message_prompt}"
         
     # 使用增强了记忆的系统提示词
     memory_enhanced_prompt = get_memory_enhanced_prompt(str(convo_id), system_prompt)
@@ -302,6 +307,11 @@ async def getChatGPT(update_message, context, title, robot, message, chatid, mes
         return
 
     try:
+        # 用于检测是否可能是JSON格式的消息
+        might_be_json = False
+        json_detection_done = False
+        first_chunk = True
+        
         # print("text", text)
         async for data in robot.ask_stream_async(text, convo_id=convo_id, pass_history=pass_history, model=model_name, language=language, api_url=api_url, api_key=api_key, system_prompt=system_prompt, plugins=plugins):
         # for data in robot.ask_stream(text, convo_id=convo_id, pass_history=pass_history, model=model_name):
@@ -309,6 +319,27 @@ async def getChatGPT(update_message, context, title, robot, message, chatid, mes
                 return
             if "message_search_stage_" not in data:
                 result = result + data
+            
+            # 在前几个数据块中检测是否可能是JSON格式
+            if first_chunk and not json_detection_done:
+                # 如果是第一个数据块，检查是否可能是JSON开头
+                first_chunk = False
+                result_so_far = result.strip()
+                
+                # 检查是否可能是JSON格式
+                if (result_so_far.startswith("{") or 
+                    result_so_far.lower().startswith("json") or 
+                    result_so_far.startswith("```")):
+                    logging.info(f"检测到可能是JSON格式的消息开头: {result_so_far[:20]}...")
+                    might_be_json = True
+                
+                json_detection_done = True
+            
+            # 如果可能是JSON格式，我们不进行流式更新，而是等待完整消息
+            if might_be_json:
+                # 只在接收完所有数据后更新一次
+                continue
+                
             tmpresult = result
             if re.sub(r"```", '', result.split("\n")[-1]).count("`") % 2 != 0:
                 tmpresult = result + "`"
@@ -427,15 +458,17 @@ async def getChatGPT(update_message, context, title, robot, message, chatid, mes
                     reply_to_message_id=messageid,
                 )).message_id
 
-            now_result = escape(tmpresult, italic=False)
-            if now_result and (modifytime % Frequency_Modification == 0 and lastresult != now_result) or "message_search_stage_" in data:
-                try:
-                    await context.bot.edit_message_text(chat_id=chatid, message_id=answer_messageid, text=now_result, parse_mode='MarkdownV2', disable_web_page_preview=True, read_timeout=time_out, write_timeout=time_out, pool_timeout=time_out, connect_timeout=time_out)
-                    lastresult = now_result
-                except Exception as e:
-                    # print('\033[31m')
-                    print("1: Unexpected error4:", type(e), str(e))
-                    # print('\033[0m')
+            # 如果不是可能的JSON格式，则进行正常的流式更新
+            if not might_be_json:
+                now_result = escape(tmpresult, italic=False)
+                if now_result and (modifytime % Frequency_Modification == 0 and lastresult != now_result) or "message_search_stage_" in data:
+                    try:
+                        await context.bot.edit_message_text(chat_id=chatid, message_id=answer_messageid, text=now_result, parse_mode='MarkdownV2', disable_web_page_preview=True, read_timeout=time_out, write_timeout=time_out, pool_timeout=time_out, connect_timeout=time_out)
+                        lastresult = now_result
+                    except Exception as e:
+                        # print('\033[31m')
+                        print("1: Unexpected error4:", type(e), str(e))
+                        # print('\033[0m')
             
             modifytime += 1
             
@@ -487,6 +520,48 @@ async def getChatGPT(update_message, context, title, robot, message, chatid, mes
             except Exception as e:
                 logger.warning(f"Failed to send image(s): {str(e)}")
 
+    # 如果可能是JSON格式，我们在接收完所有数据后再处理
+    if might_be_json:
+        logging.info(f"模型输出完成，检测到可能是JSON格式的消息，尝试处理结构化消息")
+        try:
+            # 处理结构化消息，检查是否需要拆分发送
+            processed_result = await process_structured_messages(
+                result, 
+                context, 
+                chatid, 
+                message_thread_id, 
+                messageid
+            )
+            
+            # 如果处理后的结果为空字符串，说明消息已经被拆分发送，删除原始"思考中"消息
+            if processed_result == "":
+                try:
+                    await context.bot.delete_message(chat_id=chatid, message_id=answer_messageid)
+                    logging.info("结构化消息处理成功，已删除原始'思考中'消息")
+                    return
+                except Exception as e:
+                    logging.error(f"删除原始消息时出错: {str(e)}")
+                    return
+            
+            # 否则，使用处理后的结果更新原始消息
+            now_result = escape(processed_result, italic=False)
+            await context.bot.edit_message_text(
+                chat_id=chatid, 
+                message_id=answer_messageid, 
+                text=now_result, 
+                parse_mode='MarkdownV2', 
+                disable_web_page_preview=True, 
+                read_timeout=time_out, 
+                write_timeout=time_out, 
+                pool_timeout=time_out, 
+                connect_timeout=time_out
+            )
+            return
+        except Exception as e:
+            logging.error(f"处理结构化消息时出错: {str(e)}")
+            # 如果处理结构化消息失败，回退到普通消息处理
+    
+    # 普通消息的最终处理（非JSON或JSON处理失败的情况）
     now_result = escape(tmpresult, italic=False)
     if lastresult != now_result and answer_messageid:
         if "Can't parse entities: can't find end of code entity at byte offset" in tmpresult:
@@ -494,7 +569,17 @@ async def getChatGPT(update_message, context, title, robot, message, chatid, mes
             print(now_result)
         elif now_result:
             try:
-                await context.bot.edit_message_text(chat_id=chatid, message_id=answer_messageid, text=now_result, parse_mode='MarkdownV2', disable_web_page_preview=True, read_timeout=time_out, write_timeout=time_out, pool_timeout=time_out, connect_timeout=time_out)
+                await context.bot.edit_message_text(
+                    chat_id=chatid, 
+                    message_id=answer_messageid, 
+                    text=now_result, 
+                    parse_mode='MarkdownV2', 
+                    disable_web_page_preview=True, 
+                    read_timeout=time_out, 
+                    write_timeout=time_out, 
+                    pool_timeout=time_out, 
+                    connect_timeout=time_out
+                )
             except Exception as e:
                 if "parse entities" in str(e):
                     await context.bot.edit_message_text(chat_id=chatid, message_id=answer_messageid, text=tmpresult, disable_web_page_preview=True, read_timeout=time_out, write_timeout=time_out, pool_timeout=time_out, connect_timeout=time_out)
@@ -529,6 +614,7 @@ async def button_press(update, context):
     _, _, _, _, _, _, _, _, convo_id, _, _, _ = await GetMesageInfo(update, context)
     callback_query = update.callback_query
     info_message = update_info_message(convo_id)
+
     await callback_query.answer()
     data = callback_query.data
     banner = strings['message_banner'][get_current_lang(convo_id)]
