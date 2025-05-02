@@ -6,6 +6,7 @@ load_dotenv()
 import re
 from utils.i18n import strings
 from datetime import datetime
+import pytz
 
 # We expose variables for access from other modules
 
@@ -78,7 +79,8 @@ LANGUAGES_TO_CODE = {
     "Russian": "ru",
 }
 
-current_date = datetime.now()
+CHINA_TZ = pytz.timezone('Asia/Shanghai')
+current_date = datetime.now(CHINA_TZ)
 Current_Date = current_date.strftime("%Y-%m-%d")
 SYSTEM_PROMPT = os.environ.get('SYSTEMPROMPT', prompt.system_prompt.format(LANGUAGE, Current_Date))
 systemprompt = SYSTEM_PROMPT

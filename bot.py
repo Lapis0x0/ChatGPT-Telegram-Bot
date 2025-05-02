@@ -50,7 +50,11 @@ from utils.scripts import GetMesageInfo, safe_get, is_emoji
 from telegram.constants import ChatAction
 from telegram import BotCommand, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent, Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InputMediaPhoto, InlineKeyboardButton
 from telegram.ext import CommandHandler, MessageHandler, ApplicationBuilder, filters, CallbackQueryHandler, Application, AIORateLimiter, InlineQueryHandler, ContextTypes
-from datetime import timedelta
+from datetime import timedelta, datetime
+import pytz
+
+# 定义东八区时区
+CHINA_TZ = pytz.timezone('Asia/Shanghai')
 
 import asyncio
 lock = asyncio.Lock()
@@ -261,6 +265,12 @@ async def getChatGPT(update_message, context, title, robot, message, chatid, mes
         system_prompt = Users.get_config(convo_id, "claude_systemprompt")
     else:
         system_prompt = Users.get_config(convo_id, "systemprompt")
+    
+    # 添加当前东八区日期和时间到系统提示词
+    current_datetime = datetime.now(CHINA_TZ)
+    current_date = current_datetime.strftime("%Y-%m-%d")
+    current_time = current_datetime.strftime("%H:%M")
+    system_prompt = f"当前日期和时间（东八区）：{current_date} {current_time}\n\n{system_prompt}"
         
     # 使用增强了记忆的系统提示词
     memory_enhanced_prompt = get_memory_enhanced_prompt(str(convo_id), system_prompt)

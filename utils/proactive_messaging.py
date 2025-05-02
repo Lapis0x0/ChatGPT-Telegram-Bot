@@ -14,8 +14,12 @@ from config import Users, get_robot, GOOGLE_AI_API_KEY, ChatGPTbot
 # 配置项
 PROACTIVE_AGENT_ENABLED = os.environ.get('PROACTIVE_AGENT_ENABLED', 'False') == 'True'
 ADMIN_LIST = os.environ.get('ADMIN_LIST', '')
+# 在系统提示词中添加东八区当前日期和时间
+current_datetime = datetime.now(pytz.timezone('Asia/Shanghai'))
+current_date = current_datetime.strftime('%Y-%m-%d')
+current_time = current_datetime.strftime('%H:%M')
 PROACTIVE_AGENT_SYSTEM_PROMPT = os.environ.get('PROACTIVE_AGENT_SYSTEM_PROMPT', 
-"""你是一个主动沟通的助手。你的任务是：
+f"""你是一个主动沟通的助手。当前日期和时间（东八区）：{current_date} {current_time}
 1. 每天决定3-4个适合的时间点，在这些时间点主动与用户沟通
 2. 根据用户的历史对话和兴趣，生成有价值、有趣的消息
 3. 避免在不适当的时间（如深夜）打扰用户

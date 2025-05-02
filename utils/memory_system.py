@@ -7,8 +7,11 @@ import pytz
 # 定义东八区时区
 CHINA_TZ = pytz.timezone('Asia/Shanghai')
 
-# 从环境变量获取系统提示词
-DEFAULT_SYSTEM_PROMPT = os.environ.get('SYSTEMPROMPT', "你是一个有帮助的AI助手。")
+# 从环境变量获取系统提示词，并确保包含东八区日期和时间
+current_datetime = datetime.now(CHINA_TZ)
+current_date = current_datetime.strftime('%Y-%m-%d')
+current_time = current_datetime.strftime('%H:%M')
+DEFAULT_SYSTEM_PROMPT = os.environ.get('SYSTEMPROMPT', f"你是一个有帮助的AI助手。当前日期和时间（东八区）：{current_date} {current_time}")
 
 # 获取东八区当前时间
 def get_china_time():
