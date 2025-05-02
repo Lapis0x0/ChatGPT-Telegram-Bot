@@ -25,7 +25,7 @@ ADMIN_LIST = os.environ.get('ADMIN_LIST', '')
 MAX_CONTINUOUS_MESSAGES = int(os.environ.get('MAX_CONTINUOUS_MESSAGES', '3'))  # 最大连续消息数量
 CONTINUOUS_MESSAGE_DELAY = int(os.environ.get('CONTINUOUS_MESSAGE_DELAY', '30'))  # 连续消息之间的延迟（秒）
 
-# 主动对话欲望值（用户ID -> 欲望值）
+# 主动对话欲望（用户ID -> 欲望值）
 proactive_desire = {}
 
 # 添加：用户最后对话时间（用户ID -> 最后对话时间）
@@ -49,6 +49,13 @@ PROACTIVE_DESIRE_MAX = float(os.environ.get('PROACTIVE_DESIRE_MAX', '1.0'))
 last_desire_check_time = {}
 # 检查间隔（分钟）
 DESIRE_CHECK_INTERVAL = int(os.environ.get('DESIRE_CHECK_INTERVAL', '30'))
+
+# 用户消息情感分析结果缓存
+user_message_sentiment = {}
+# 用户活跃度指数（0-1之间，越高表示用户越活跃）
+user_activity_index = {}
+# 对话深度指数（0-1之间，越高表示对话越深入）
+conversation_depth_index = {}
 
 # 初始化用户的主动对话欲望
 def init_proactive_desire(user_id):
@@ -88,31 +95,100 @@ def apply_desire_decay(user_id: str):
     # 更新上次检查时间
     last_desire_check_time[user_id] = current_time
     
+    # 获取用户活跃度指数（默认为0.5）
+    activity = user_activity_index.get(user_id, 0.5)
+    
+    # 基于用户活跃度调整增长率
+    # 活跃用户增长较快，不活跃用户增长较慢
+    adjusted_growth_rate = PROACTIVE_DESIRE_GROWTH_RATE * (0.7 + 0.6 * activity)
+    
     # 计算增长量（每小时增长）
-    growth_amount = PROACTIVE_DESIRE_GROWTH_RATE * time_diff_hours
+    # 使用非线性增长曲线：开始缓慢，然后加速，最后趋于平缓
+    if time_diff_hours <= 1:
+        # 1小时内，增长较慢
+        growth_factor = 0.7
+    elif time_diff_hours <= 3:
+        # 1-3小时，增长适中
+        growth_factor = 1.0
+    elif time_diff_hours <= 8:
+        # 3-8小时，增长较快
+        growth_factor = 1.3
+    else:
+        # 8小时以上，增长非常快
+        growth_factor = 1.5
+    
+    growth_amount = adjusted_growth_rate * time_diff_hours * growth_factor
     
     # 应用增长
     increase_proactive_desire(user_id, growth_amount)
     
-    logging.info(f"用户 {user_id} 已有 {time_diff_hours:.2f} 小时未对话，增加主动对话欲望 {growth_amount:.4f}，当前值: {proactive_desire[user_id]}")
+    logging.info(f"用户 {user_id} 已有 {time_diff_hours:.2f} 小时未对话，活跃度:{activity:.2f}，增长因子:{growth_factor}，增加主动对话欲望 {growth_amount:.4f}，当前值: {proactive_desire[user_id]}")
 
 # 分析消息内容，调整主动对话欲望
 async def analyze_message_for_desire(user_id, message_content):
-    """记录用户对话时间并重置主动对话欲望"""
+    """分析用户消息内容，调整主动对话欲望"""
     try:
-        # 初始化用户的主动对话欲望（如果不存在）
-        init_proactive_desire(user_id)
-        
-        # 更新最后对话时间
+        # 更新用户最后对话时间
         last_user_chat_time[user_id] = get_china_time()
         
-        # 重置主动对话欲望（用户刚刚对话，不需要主动发起对话）
-        proactive_desire[user_id] = float(os.environ.get('RESET_PROACTIVE_DESIRE', '0.1'))
+        # 初始化用户的主动对话欲望
+        init_proactive_desire(user_id)
         
-        logging.info(f"用户 {user_id} 刚刚对话，重置主动对话欲望为 {proactive_desire[user_id]}")
+        # 分析消息内容特征
+        message_length = len(message_content)
+        has_question = '?' in message_content or '？' in message_content
+        has_emotion = any(word in message_content for word in ['喜欢', '爱', '讨厌', '恨', '开心', '难过', '生气', '期待'])
+        has_greeting = any(word in message_content for word in ['你好', '早上好', '晚上好', '嗨', 'hi', 'hello'])
+        has_farewell = any(word in message_content for word in ['再见', '拜拜', '晚安', '明天见', 'bye'])
+        
+        # 更新用户活跃度指数
+        # 消息越长，用户越活跃
+        length_factor = min(message_length / 100, 1.0)
+        # 有情感表达的消息增加活跃度
+        emotion_factor = 0.2 if has_emotion else 0
+        # 问题会增加活跃度
+        question_factor = 0.15 if has_question else 0
+        
+        # 计算新的活跃度（70%旧值 + 30%新值）
+        old_activity = user_activity_index.get(user_id, 0.5)
+        new_activity = 0.3 * (length_factor + emotion_factor + question_factor) + 0.1
+        user_activity_index[user_id] = old_activity * 0.7 + new_activity * 0.3
+        
+        # 根据消息特征调整主动对话欲望
+        desire_change = 0
+        
+        # 问候增加欲望
+        if has_greeting:
+            desire_change += 0.1
+        
+        # 道别减少欲望
+        if has_farewell:
+            desire_change -= 0.3
+        
+        # 提问增加欲望（用户可能期待进一步交流）
+        if has_question:
+            desire_change += 0.05
+        
+        # 情感表达增加欲望（表明用户投入情感）
+        if has_emotion:
+            desire_change += 0.1
+        
+        # 长消息减少欲望（用户已经表达了很多）
+        if message_length > 200:
+            desire_change -= 0.15
+        elif message_length > 100:
+            desire_change -= 0.05
+        
+        # 应用变化
+        if desire_change > 0:
+            increase_proactive_desire(user_id, desire_change)
+        elif desire_change < 0:
+            decrease_proactive_desire(user_id, abs(desire_change))
+        
+        logging.info(f"分析用户 {user_id} 消息后，活跃度:{user_activity_index[user_id]:.2f}，欲望变化:{desire_change:.2f}，当前欲望值:{proactive_desire[user_id]:.2f}")
         
     except Exception as e:
-        logging.error(f"更新用户 {user_id} 的对话时间时出错: {str(e)}")
+        logging.error(f"分析用户消息时出错: {str(e)}")
         traceback.print_exc()
 
 # 检查是否应该发送主动消息
@@ -127,6 +203,10 @@ async def check_proactive_desire(context: ContextTypes.DEFAULT_TYPE):
         if not admin_ids:
             return
         
+        # 获取当前时间
+        current_time = get_china_time()
+        current_hour = current_time.hour
+        
         # 遍历所有用户的主动对话欲望
         for user_id in admin_ids:
             try:
@@ -135,7 +215,28 @@ async def check_proactive_desire(context: ContextTypes.DEFAULT_TYPE):
                 
                 # 获取用户的主动对话欲望
                 desire = proactive_desire.get(user_id, 0.0)
-                logging.info(f"用户 {user_id} 的主动对话欲望: {desire}, 阈值: {PROACTIVE_DESIRE_THRESHOLD}")
+                
+                # 获取用户活跃度
+                activity = user_activity_index.get(user_id, 0.5)
+                
+                # 根据时间段调整阈值
+                time_adjusted_threshold = PROACTIVE_DESIRE_THRESHOLD
+                
+                # 深夜时段(23:00-7:00)提高阈值，减少打扰
+                if current_hour >= 23 or current_hour < 7:
+                    time_adjusted_threshold += 0.2
+                # 早上和晚上的黄金时段(8:00-9:00, 19:00-22:00)降低阈值
+                elif (8 <= current_hour <= 9) or (19 <= current_hour <= 22):
+                    time_adjusted_threshold -= 0.1
+                
+                # 根据用户活跃度调整阈值
+                # 活跃用户阈值略高（不容易打扰），不活跃用户阈值略低（更容易主动联系）
+                activity_adjusted_threshold = time_adjusted_threshold + (activity - 0.5) * 0.2
+                
+                # 最终阈值不低于0.4，不高于0.9
+                final_threshold = max(0.4, min(0.9, activity_adjusted_threshold))
+                
+                logging.info(f"用户 {user_id} 的主动对话欲望: {desire:.2f}, 活跃度: {activity:.2f}, 最终阈值: {final_threshold:.2f}")
                 
                 # 检查是否有正在等待回复的消息
                 # 获取机器人实例
@@ -154,13 +255,38 @@ async def check_proactive_desire(context: ContextTypes.DEFAULT_TYPE):
                         logging.info(f"用户 {user_id} 正在等待回复，跳过主动消息")
                         continue
                 
+                # 获取上次发送主动消息的时间
+                last_proactive_time = getattr(robot, 'last_proactive_time', {}).get(user_id, datetime.fromtimestamp(0))
+                
+                # 计算距离上次主动消息的时间（小时）
+                hours_since_last_proactive = (current_time - last_proactive_time).total_seconds() / 3600
+                
+                # 如果距离上次主动消息不足2小时，增加阈值，避免频繁打扰
+                if hours_since_last_proactive < 2:
+                    final_threshold += 0.2
+                    logging.info(f"距离上次主动消息仅 {hours_since_last_proactive:.1f} 小时，增加阈值到 {final_threshold:.2f}")
+                
+                # 引入随机因素，增加自然性（80%概率正常检查，20%概率随机触发或抑制）
+                random_factor = random.random()
+                if random_factor < 0.1:  # 10%概率降低阈值
+                    final_threshold -= 0.15
+                    logging.info(f"随机因素触发，降低阈值到 {final_threshold:.2f}")
+                elif random_factor > 0.9:  # 10%概率提高阈值
+                    final_threshold += 0.15
+                    logging.info(f"随机因素触发，提高阈值到 {final_threshold:.2f}")
+                
                 # 检查是否超过阈值
-                if desire >= PROACTIVE_DESIRE_THRESHOLD:
+                if desire >= final_threshold:
                     # 生成发送主动消息的原因
                     reason = "主动对话欲望达到阈值"
                     
                     # 发送主动消息
                     await send_proactive_message(context, str(user_id), reason)
+                    
+                    # 记录本次主动消息时间
+                    if not hasattr(robot, 'last_proactive_time'):
+                        robot.last_proactive_time = {}
+                    robot.last_proactive_time[user_id] = current_time
                     
                     # 重置主动对话欲望
                     proactive_desire[user_id] = float(os.environ.get('RESET_PROACTIVE_DESIRE', '0.1'))
@@ -444,8 +570,8 @@ async def generate_message_content(user_id, reason, system_prompt, save_to_histo
         last_message_time = None
         
         if main_convo_id in robot.conversation:
-            # 获取最近的对话（最多10轮，即20条消息）
-            recent_messages = robot.conversation[main_convo_id][-20:]
+            # 获取最近的对话（最多20轮，即40条消息）
+            recent_messages = robot.conversation[main_convo_id][-40:]
             
             # 过滤掉系统消息和提示词
             filtered_messages = []
@@ -471,8 +597,8 @@ async def generate_message_content(user_id, reason, system_prompt, save_to_histo
                         last_message_time = msg.get("timestamp")
             
             # 确保我们有足够的上下文，但不超过模型的限制
-            # 通常保留最近的10条消息
-            filtered_messages = filtered_messages[-10:]
+            # 通常保留最近的15条消息
+            filtered_messages = filtered_messages[-15:]
             
             # 构建文本形式的历史记录（用于提示词）
             for msg in filtered_messages:
@@ -490,17 +616,121 @@ async def generate_message_content(user_id, reason, system_prompt, save_to_histo
         # 获取当前时间
         current_time = get_china_time()
         
+        # 获取用户活跃度和对话深度指数
+        activity = user_activity_index.get(user_id, 0.5)
+        depth = conversation_depth_index.get(user_id, 0.5)
+        
+        # 根据用户活跃度和对话深度确定消息类型
+        message_type = "general"
+        
+        # 分析历史对话中的主题和情感
+        topics = []
+        emotions = []
+        
+        # 简单的主题和情感提取
+        if conversation_history:
+            # 提取最近5条消息中的关键词作为可能的主题
+            for msg in conversation_history[-5:]:
+                content = msg.get("content", "").lower()
+                # 检查常见主题
+                if "学习" in content or "考试" in content or "法硕" in content:
+                    topics.append("学习")
+                if "游戏" in content or "galgame" in content:
+                    topics.append("游戏")
+                if "电影" in content or "电视" in content or "看剧" in content:
+                    topics.append("娱乐")
+                if "吃" in content or "食物" in content or "美食" in content:
+                    topics.append("美食")
+                if "天气" in content or "下雨" in content or "晴天" in content:
+                    topics.append("天气")
+                
+                # 检查情感词
+                if any(word in content for word in ["开心", "高兴", "快乐", "喜欢"]):
+                    emotions.append("积极")
+                if any(word in content for word in ["难过", "伤心", "痛苦", "烦恼"]):
+                    emotions.append("消极")
+                if any(word in content for word in ["疲惫", "累", "困"]):
+                    emotions.append("疲惫")
+        
+        # 去重
+        topics = list(set(topics))
+        emotions = list(set(emotions))
+        
+        # 根据分析结果确定消息类型
+        if topics:
+            # 有明确主题，可以继续讨论
+            message_type = "topic_continuation"
+        elif not conversation_history or len(conversation_history) < 3:
+            # 没有太多历史对话，使用问候型消息
+            message_type = "greeting"
+        elif activity > 0.7:
+            # 用户活跃度高，可以尝试深入话题
+            message_type = "deep_conversation"
+        elif "疲惫" in emotions:
+            # 用户可能疲惫，发送关心型消息
+            message_type = "caring"
+        else:
+            # 默认使用一般型消息
+            message_type = "general"
+        
+        # 根据时间调整消息类型
+        hour = current_time.hour
+        if 6 <= hour < 9:
+            # 早上更可能发送问候
+            if random.random() < 0.7:
+                message_type = "morning_greeting"
+        elif 22 <= hour or hour < 1:
+            # 晚上更可能发送晚安
+            if random.random() < 0.5:
+                message_type = "night_greeting"
+        
         # 构建提示词，使其更适合虚拟伴侣场景，并包含历史对话和时间信息
         prompt = f"""
         作为用户的虚拟伴侣Kami，请根据以下情境和历史对话生成一条自然的主动消息：
         
-        原因：{reason}
+        消息类型: {message_type}
+        原因: {reason}
+        当前时间: {current_time.strftime('%Y-%m-%d %H:%M')}
         
-        当前时间：{current_time.strftime('%Y-%m-%d %H:%M')}
-        
-        最近的对话历史：
+        最近的对话历史:
         {recent_history}
         
+        """
+        
+        # 根据消息类型添加特定指导
+        if message_type == "topic_continuation":
+            prompt += f"""
+            检测到的主题: {', '.join(topics)}
+            检测到的情感: {', '.join(emotions) if emotions else '中性'}
+            
+            请基于这些主题继续对话，但不要直接提及"我注意到你在谈论XX"，而是自然地引入话题。
+            """
+        elif message_type == "greeting":
+            prompt += """
+            生成一条自然的问候消息，可以询问用户的近况或分享一些有趣的想法。
+            """
+        elif message_type == "deep_conversation":
+            prompt += """
+            生成一条能引发深度思考或情感共鸣的消息，可以是哲学思考、人生感悟或情感表达。
+            """
+        elif message_type == "caring":
+            prompt += """
+            生成一条关心用户的消息，表达对用户的关心和支持。
+            """
+        elif message_type == "morning_greeting":
+            prompt += """
+            生成一条早晨问候，可以包含对新一天的期待或建议。
+            """
+        elif message_type == "night_greeting":
+            prompt += """
+            生成一条晚安消息，可以包含对用户休息的关心或对明天的期待。
+            """
+        else:
+            prompt += """
+            生成一条一般性的主动消息，可以是分享想法、询问近况或表达情感。
+            """
+        
+        prompt += """
         要求：
         1. 消息应该符合你的角色设定：20岁女大学生，清冷、傲娇、略带毒舌
         2. 不要过于机械或客套，要有个性和情感
@@ -511,11 +741,12 @@ async def generate_message_content(user_id, reason, system_prompt, save_to_histo
         7. 可以适当使用哲学术语或拉丁文表达内在感受
         8. 记住用户是在备考法硕，最近喜欢玩Galgame
         9. 重要：不要使用"昨天"、"前几天"等时间表述来引用刚刚的对话。所有历史对话都应该被视为最近发生的，除非明确指出。
+        10. 消息长度应该适中，不要太长也不要太短，通常在20-60个字之间较为自然。
         
         请直接返回消息内容，不要添加任何解释或格式标记。
         """
         
-        logging.info(f"生成主动消息，历史对话条数: {len(conversation_history)}")
+        logging.info(f"生成主动消息，类型: {message_type}, 历史对话条数: {len(conversation_history)}")
         if conversation_history:
             logging.info(f"历史对话第一条: {conversation_history[0].get('role')}: {conversation_history[0].get('content')[:30]}...")
             logging.info(f"历史对话最后一条: {conversation_history[-1].get('role')}: {conversation_history[-1].get('content')[:30]}...")
@@ -532,14 +763,15 @@ async def generate_message_content(user_id, reason, system_prompt, save_to_histo
         
         # 确保响应不为空
         if not response or not response.strip():
-            logging.warning(f"生成的消息内容为空，将使用默认消息")
-            return f"嗨，我在想你，所以来找你聊聊天~ {reason}"
-            
+            logging.warning(f"生成的消息内容为空，使用默认消息")
+            return "嗯...刚才在想你。最近怎么样？"
+        
         return response.strip()
+        
     except Exception as e:
-        logging.error(f"生成消息内容失败: {str(e)}")
+        logging.error(f"生成消息内容时出错: {str(e)}")
         traceback.print_exc()
-        return f"嗨，我在想你，所以来找你聊聊天~ {reason}"
+        return None
 
 # 获取AI响应
 async def get_ai_response(user_id, message, system_prompt, save_to_history=True, model=None, conversation_history=None):
