@@ -12,49 +12,590 @@ from telegram.ext import ContextTypes
 from config import Users, get_robot, GOOGLE_AI_API_KEY, ChatGPTbot
 
 # 配置项
-PROACTIVE_AGENT_ENABLED = os.environ.get('PROACTIVE_AGENT_ENABLED', 'False') == 'True'
+PROACTIVE_AGENT_ENABLED = os.environ.get('PROACTIVE_AGENT_ENABLED', 'false').lower() == 'true'
+PROACTIVE_AGENT_MODEL = os.environ.get('PROACTIVE_AGENT_MODEL', 'gemini-2.5-flash-preview-04-17')
+PROACTIVE_DESIRE_THRESHOLD = float(os.environ.get('PROACTIVE_DESIRE_THRESHOLD', '0.7'))
+PROACTIVE_DESIRE_DECAY_RATE = float(os.environ.get('PROACTIVE_DESIRE_DECAY_RATE', '0.01'))
 ADMIN_LIST = os.environ.get('ADMIN_LIST', '')
-# 在系统提示词中添加东八区当前日期和时间
-current_datetime = datetime.now(pytz.timezone('Asia/Shanghai'))
-current_date = current_datetime.strftime('%Y-%m-%d')
-current_time = current_datetime.strftime('%H:%M')
-PROACTIVE_AGENT_SYSTEM_PROMPT = os.environ.get('PROACTIVE_AGENT_SYSTEM_PROMPT', 
-f"""你是一个主动沟通的助手。当前日期和时间（东八区）：{current_date} {current_time}
-1. 每天决定3-4个适合的时间点，在这些时间点主动与用户沟通
-2. 根据用户的历史对话和兴趣，生成有价值、有趣的消息
-3. 避免在不适当的时间（如深夜）打扰用户
-4. 你的消息应该有目的性，可以是：分享知识、提醒事项、询问进展、推荐内容等
-请记住，你的目标是增强用户体验，而不是打扰用户。
-""")
-PROACTIVE_AGENT_MODEL = os.environ.get('PROACTIVE_AGENT_MODEL', '')  # 指定主动消息使用的模型
 
-# 存储计划的消息时间
-planned_message_times = {}
+# 连续对话配置
+MAX_CONTINUOUS_MESSAGES = int(os.environ.get('MAX_CONTINUOUS_MESSAGES', '3'))  # 最大连续消息数量
+CONTINUOUS_MESSAGE_DELAY = int(os.environ.get('CONTINUOUS_MESSAGE_DELAY', '30'))  # 连续消息之间的延迟（秒）
+
+# 主动对话欲望值（用户ID -> 欲望值）
+proactive_desire = {}
 
 # 定义东八区时区
 CHINA_TZ = pytz.timezone('Asia/Shanghai')
 
-# 获取东八区当前时间
+# 获取当前东八区时间
 def get_china_time():
-    """获取中国时区（东八区）的当前时间"""
-    return datetime.now(pytz.UTC).astimezone(CHINA_TZ)
+    """获取当前东八区时间"""
+    return datetime.now(CHINA_TZ)
 
-# 获取管理员列表
+# 主动对话欲望最小值
+PROACTIVE_DESIRE_MIN = float(os.environ.get('PROACTIVE_DESIRE_MIN', '0.0'))
+
+# 主动对话欲望最大值
+PROACTIVE_DESIRE_MAX = float(os.environ.get('PROACTIVE_DESIRE_MAX', '1.0'))
+
+# 上次检查主动对话欲望的时间
+last_desire_check_time = {}
+# 检查间隔（分钟）
+DESIRE_CHECK_INTERVAL = int(os.environ.get('DESIRE_CHECK_INTERVAL', '30'))
+
+# 初始化用户的主动对话欲望
+def init_proactive_desire(user_id):
+    """初始化用户的主动对话欲望"""
+    if user_id not in proactive_desire:
+        proactive_desire[user_id] = float(os.environ.get('INITIAL_PROACTIVE_DESIRE', '0.2'))
+        last_desire_check_time[user_id] = get_china_time()
+        logging.info(f"初始化用户 {user_id} 的主动对话欲望为 {proactive_desire[user_id]}")
+
+# 增加主动对话欲望
+def increase_proactive_desire(user_id, amount):
+    """增加用户的主动对话欲望"""
+    init_proactive_desire(user_id)
+    proactive_desire[user_id] = min(proactive_desire[user_id] + amount, PROACTIVE_DESIRE_MAX)
+    logging.info(f"增加用户 {user_id} 的主动对话欲望 {amount}，当前值: {proactive_desire[user_id]}")
+
+# 减少主动对话欲望
+def decrease_proactive_desire(user_id, amount):
+    """减少用户的主动对话欲望"""
+    init_proactive_desire(user_id)
+    proactive_desire[user_id] = max(proactive_desire[user_id] - amount, PROACTIVE_DESIRE_MIN)
+    logging.info(f"减少用户 {user_id} 的主动对话欲望 {amount}，当前值: {proactive_desire[user_id]}")
+
+# 应用主动对话欲望衰减
+def apply_desire_decay(user_id: str):
+    """应用主动对话欲望衰减"""
+    # 获取上次检查时间
+    last_check = last_desire_check_time.get(user_id, datetime.now(CHINA_TZ) - timedelta(minutes=DESIRE_CHECK_INTERVAL))
+    
+    # 计算时间差（分钟）
+    time_diff = (datetime.now(CHINA_TZ) - last_check).total_seconds() / 60
+    
+    # 如果时间差小于检查间隔，跳过
+    if time_diff < DESIRE_CHECK_INTERVAL:
+        return
+    
+    # 更新上次检查时间
+    last_desire_check_time[user_id] = datetime.now(CHINA_TZ)
+    
+    # 计算衰减量（每分钟衰减）
+    decay_amount = PROACTIVE_DESIRE_DECAY_RATE * time_diff / (24 * 60)  # 按比例计算
+    
+    # 应用衰减
+    decrease_proactive_desire(user_id, decay_amount)
+
+# 分析消息内容，调整主动对话欲望
+async def analyze_message_for_desire(user_id, message_content):
+    """分析消息内容，调整主动对话欲望"""
+    try:
+        # 构建提示词
+        prompt = f"""
+        分析以下用户消息，评估我是否应该增加或减少与用户主动对话的欲望。
+        
+        用户消息: "{message_content}"
+        
+        请根据以下标准评估:
+        1. 如果用户表达了希望继续交流的兴趣，应增加主动对话欲望
+        2. 如果用户表达了不想被打扰的意愿，应减少主动对话欲望
+        3. 如果用户提出了问题或表达了好奇心，应增加主动对话欲望
+        4. 如果用户回应简短或敷衍，应减少主动对话欲望
+        5. 如果用户分享了个人经历或情感，应增加主动对话欲望
+        
+        请仅返回一个JSON格式的结果:
+        {{
+            "adjustment": 浮点数(-0.2到0.2之间),
+            "reason": "调整原因的简短解释"
+        }}
+        
+        正数表示增加主动对话欲望，负数表示减少主动对话欲望。
+        """
+        
+        # 调用AI分析，强制使用Gemini模型
+        gemini_model = "gemini-2.5-pro-preview-03-25"  # 使用Gemini模型
+        response = await get_ai_response(
+            user_id=user_id,
+            message=prompt,
+            system_prompt="你是一个分析用户意图和情感的助手，你的任务是判断是否应该增加或减少与用户的主动交流频率。",
+            save_to_history=False,
+            model=gemini_model
+        )
+        
+        # 解析响应
+        try:
+            # 提取JSON部分
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                result = json.loads(json_str)
+                
+                adjustment = float(result.get("adjustment", 0))
+                # 限制调整范围
+                adjustment = max(min(adjustment, 0.2), -0.2)
+                
+                if adjustment > 0:
+                    increase_proactive_desire(user_id, adjustment)
+                elif adjustment < 0:
+                    decrease_proactive_desire(user_id, abs(adjustment))
+                
+                logging.info(f"分析用户 {user_id} 消息后调整主动对话欲望: {adjustment}, 原因: {result.get('reason', '未提供')}")
+                return adjustment
+            else:
+                logging.warning(f"无法从AI响应中提取JSON: {response}")
+                return 0
+        except Exception as e:
+            logging.error(f"解析AI响应时出错: {str(e)}, 响应: {response}")
+            return 0
+            
+    except Exception as e:
+        logging.error(f"分析消息调整主动对话欲望时出错: {str(e)}")
+        return 0
+
+# 检查是否应该发送主动消息
+async def check_proactive_desire(context: ContextTypes.DEFAULT_TYPE):
+    """定期检查所有用户的主动对话欲望，如果超过阈值则发送主动消息"""
+    if not PROACTIVE_AGENT_ENABLED:
+        return
+    
+    try:
+        # 获取管理员ID列表
+        admin_ids = get_admin_ids()
+        if not admin_ids:
+            return
+        
+        # 遍历所有用户的主动对话欲望
+        for user_id in admin_ids:
+            try:
+                # 应用欲望衰减
+                apply_desire_decay(user_id)
+                
+                # 获取用户的主动对话欲望
+                desire = proactive_desire.get(user_id, 0.0)
+                logging.info(f"用户 {user_id} 的主动对话欲望: {desire}, 阈值: {PROACTIVE_DESIRE_THRESHOLD}")
+                
+                # 检查是否有正在等待回复的消息
+                # 获取机器人实例
+                robot, _, _, _ = get_robot(str(user_id))
+                main_convo_id = str(user_id)
+                
+                # 检查是否有对话历史
+                if main_convo_id in robot.conversation and len(robot.conversation[main_convo_id]) >= 1:
+                    # 获取最后一条消息
+                    last_message = robot.conversation[main_convo_id][-1]
+                    
+                    # 如果最后一条是用户消息，且不是系统添加的虚拟消息，说明用户正在等待回复
+                    if (last_message.get("role") == "user" and 
+                        "我想和你聊聊天" not in last_message.get("content", "") and
+                        "我想继续和你聊天" not in last_message.get("content", "")):
+                        logging.info(f"用户 {user_id} 正在等待回复，跳过主动消息")
+                        continue
+                
+                # 检查是否超过阈值
+                if desire >= PROACTIVE_DESIRE_THRESHOLD:
+                    # 生成发送主动消息的原因
+                    reason = "主动对话欲望达到阈值"
+                    
+                    # 发送主动消息
+                    await send_proactive_message(context, str(user_id), reason)
+                    
+                    # 重置主动对话欲望
+                    proactive_desire[user_id] = float(os.environ.get('RESET_PROACTIVE_DESIRE', '0.1'))
+                    logging.info(f"已发送主动消息并重置用户 {user_id} 的主动对话欲望为 {proactive_desire[user_id]}")
+                
+            except Exception as e:
+                logging.error(f"检查用户 {user_id} 的主动对话欲望时出错: {str(e)}")
+                traceback.print_exc()
+                
+    except Exception as e:
+        logging.error(f"检查主动对话欲望时出错: {str(e)}")
+        traceback.print_exc()
+
+# 获取管理员ID列表
 def get_admin_ids():
     """获取管理员ID列表"""
     if not ADMIN_LIST:
         return []
     
-    admin_ids = []
-    for admin_id in ADMIN_LIST.split(','):
-        admin_id = admin_id.strip()
-        if admin_id:
-            admin_ids.append(admin_id)
-    
-    return admin_ids
+    return [admin_id.strip() for admin_id in ADMIN_LIST.split(',') if admin_id.strip()]
+
+# 移除指定的任务
+def remove_job_if_exists(name, context):
+    """如果存在，则移除指定名称的任务"""
+    current_jobs = context.job_queue.get_jobs_by_name(name)
+    if not current_jobs:
+        return False
+    for job in current_jobs:
+        job.schedule_removal()
+    return True
+
+# 发送主动消息
+async def send_proactive_message(context: ContextTypes.DEFAULT_TYPE, user_id: str, reason: str):
+    """发送主动消息给用户"""
+    try:
+        # 获取机器人实例和相关配置
+        robot, _, api_key, api_url = get_robot(str(user_id))
+        
+        # 获取系统提示词
+        system_prompt = Users.get_config(str(user_id), "systemprompt")
+        
+        # 添加当前东八区日期和时间
+        current_datetime = datetime.now(CHINA_TZ)
+        current_date = current_datetime.strftime("%Y-%m-%d")
+        current_time = current_datetime.strftime("%H:%M")
+        system_prompt = f"当前日期和时间（东八区）：{current_date} {current_time}\n\n{system_prompt}"
+        
+        # 生成消息内容
+        model = os.environ.get('PROACTIVE_AGENT_MODEL', 'gemini-2.5-flash-preview-04-17')
+        message_content = await generate_message_content(user_id, reason, system_prompt, save_to_history=False, model=model)
+        
+        if not message_content:
+            logging.error(f"无法为用户 {user_id} 生成主动消息")
+            return
+        
+        # 发送消息
+        await context.bot.send_message(chat_id=user_id, text=message_content)
+        
+        # 将消息保存到对话历史
+        main_convo_id = str(user_id)
+        if main_convo_id in robot.conversation:
+            # 添加虚拟的用户消息，表示用户想聊天（但不会显示给用户）
+            robot.add_to_conversation({"role": "user", "content": "我想和你聊聊天"}, main_convo_id)
+            # 添加机器人的回复，并包含时间戳
+            robot.add_to_conversation({
+                "role": "assistant", 
+                "content": message_content,
+                "timestamp": str(current_datetime.timestamp())
+            }, main_convo_id)
+            logging.info(f"已发送主动消息给用户 {user_id} 并加入到主对话历史")
+        
+        # 重置主动对话欲望值
+        proactive_desire[user_id] = float(os.environ.get('RESET_PROACTIVE_DESIRE', '0.1'))
+        logging.info(f"已发送主动消息并重置用户 {user_id} 的主动对话欲望为 {proactive_desire[user_id]}")
+        
+        # 设置检查用户回复的定时任务
+        job_id = f"check_response_{user_id}"
+        context.job_queue.run_once(
+            lambda ctx: asyncio.create_task(check_user_response(ctx, user_id)),
+            30,
+            name=job_id
+        )
+        
+    except Exception as e:
+        logging.error(f"发送主动消息给用户 {user_id} 时出错: {str(e)}")
+        traceback.print_exc()
+
+# 检查用户是否回复
+async def check_user_response(context: ContextTypes.DEFAULT_TYPE, user_id: str):
+    """检查用户是否回复了主动消息，如果没有，可能发送后续消息"""
+    try:
+        # 获取机器人实例
+        robot, _, api_key, api_url = get_robot(str(user_id))
+        main_convo_id = str(user_id)
+        
+        # 检查用户是否已回复
+        last_user_message_time = None
+        last_bot_message_time = None
+        last_bot_message = None
+        
+        if main_convo_id in robot.conversation:
+            # 获取最近的消息
+            recent_messages = robot.conversation[main_convo_id][-5:]  # 只看最近5条
+            
+            for msg in recent_messages:
+                if msg.get("role") == "user" and "我想和你聊聊天" not in msg.get("content", ""):
+                    last_user_message_time = msg.get("timestamp", datetime.now(CHINA_TZ) - timedelta(minutes=10))
+                elif msg.get("role") == "assistant":
+                    last_bot_message_time = msg.get("timestamp", datetime.now(CHINA_TZ))
+                    last_bot_message = msg.get("content", "")
+            
+            # 如果没有找到时间戳，使用默认值
+            if not last_user_message_time:
+                last_user_message_time = datetime.now(CHINA_TZ) - timedelta(minutes=10)
+            if not last_bot_message_time:
+                last_bot_message_time = datetime.now(CHINA_TZ) - timedelta(minutes=5)
+            
+            # 检查用户是否已回复（如果用户最后一条消息时间晚于机器人最后一条消息时间）
+            if last_user_message_time and last_bot_message_time and last_user_message_time > last_bot_message_time:
+                logging.info(f"用户 {user_id} 已回复，不需要发送连续消息")
+                return
+            
+            # 检查是否已经发送了最大数量的连续消息
+            continuous_count = 0
+            for i in range(len(recent_messages) - 1, -1, -1):
+                msg = recent_messages[i]
+                if msg.get("role") == "user" and "我想和你聊聊天" in msg.get("content", ""):
+                    continuous_count += 1
+                elif msg.get("role") == "user" and "我想和你聊聊天" not in msg.get("content", ""):
+                    # 遇到真实用户消息，停止计数
+                    break
+            
+            if continuous_count >= MAX_CONTINUOUS_MESSAGES:
+                logging.info(f"已达到最大连续消息数量 {MAX_CONTINUOUS_MESSAGES}，停止发送")
+                return
+            
+            # 提取最近的对话历史
+            recent_history = ""
+            conversation_history = []
+            last_message_time = None
+            
+            if main_convo_id in robot.conversation:
+                # 获取最近的对话（最多10轮，即20条消息）
+                recent_messages = robot.conversation[main_convo_id][-20:]
+                
+                # 过滤掉系统消息和提示词
+                filtered_messages = []
+                for msg in recent_messages:
+                    role = msg.get("role", "")
+                    content = msg.get("content", "")
+                    
+                    # 排除系统消息和特定内容
+                    if (role in ["user", "assistant"] and 
+                        "我想和你聊聊天" not in content and 
+                        "我希望你主动和我聊天" not in content and 
+                        "我想继续和你聊天" not in content and
+                        "# 你的角色基本信息" not in content and 
+                        "当前日期和时间" not in content and
+                        "# 知识与能力设定" not in content and
+                        "# 语气与风格" not in content and
+                        "# 作为女朋友的部分" not in content and
+                        "# 用户的信息" not in content and
+                        content.strip()):
+                        filtered_messages.append(msg)
+                        # 记录最后一条消息的时间戳（如果有）
+                        if msg.get("timestamp"):
+                            last_message_time = msg.get("timestamp")
+            
+            # 确保我们有足够的上下文，但不超过模型的限制
+            # 通常保留最近的10条消息
+            filtered_messages = filtered_messages[-10:]
+            
+            # 构建文本形式的历史记录（用于提示词）
+            for msg in filtered_messages:
+                role_text = "用户" if msg.get("role") == "user" else "助手"
+                content = msg.get("content", "").strip()
+                if content:
+                    recent_history += f"{role_text}: {content}\n\n"
+            
+            # 构建API格式的历史记录（用于传递给模型）
+            conversation_history = [
+                {"role": msg.get("role"), "content": msg.get("content")}
+                for msg in filtered_messages
+            ]
+        
+        # 获取当前时间
+        current_time = get_china_time()
+        
+        # 构建提示词，使其更适合虚拟伴侣场景，并包含历史对话和时间信息
+        prompt = f"""
+        作为用户的虚拟伴侣Kami，我刚刚发送了以下消息给用户，但用户还没有回复：
+        "{last_bot_message}"
+        
+        当前时间：{get_china_time().strftime('%Y-%m-%d %H:%M')}
+        
+        最近的对话历史：
+        {recent_history}
+        
+        要求：
+        1. 消息应该符合你的角色设定：20岁女大学生，清冷、傲娇、略带毒舌
+        2. 不要过于机械或客套，要有个性和情感
+        3. 不要提及这是一条自动生成的消息或你是AI助手
+        4. 消息内容应该与最近的对话历史有连贯性，表现出你记得之前的交流
+        5. 如果用户之前提到了某个话题，可以自然地继续那个话题
+        6. 如果没有明显的话题可以继续，可以引入新话题，但要自然
+        7. 可以适当使用哲学术语或拉丁文表达内在感受
+        8. 记住用户是在备考法硕，最近喜欢玩Galgame
+        9. 重要：不要使用"昨天"、"前几天"等时间表述来引用刚刚的对话。所有历史对话都应该被视为最近发生的，除非明确指出。
+        
+        请返回JSON格式：
+        {{
+            "should_continue": true/false,
+            "reason": "决定原因",
+            "message": "如果应该继续，这里是后续消息内容"
+        }}
+        """
+        
+        # 获取系统提示词
+        system_prompt = Users.get_config(str(user_id), "systemprompt")
+        
+        # 添加当前东八区日期和时间
+        current_datetime = datetime.now(CHINA_TZ)
+        current_date = current_datetime.strftime("%Y-%m-%d")
+        current_time = current_datetime.strftime("%H:%M")
+        system_prompt = f"当前日期和时间（东八区）：{current_date} {current_time}\n\n{system_prompt}"
+        
+        # 获取AI回复
+        model = os.environ.get('PROACTIVE_AGENT_MODEL', 'gemini-2.5-flash-preview-04-17')
+        response = await get_ai_response(
+            user_id=user_id,
+            message=prompt,
+            system_prompt=system_prompt,
+            save_to_history=False,
+            model=model
+        )
+        
+        # 解析JSON响应
+        try:
+            # 尝试处理可能的Markdown格式
+            json_str = response
+            # 移除可能的Markdown代码块格式
+            if "```json" in json_str:
+                json_str = json_str.split("```json")[1].split("```")[0].strip()
+            elif "```" in json_str:
+                json_str = json_str.split("```")[1].split("```")[0].strip()
+            
+            result = json.loads(json_str)
+            should_continue = result.get("should_continue", False)
+            reason = result.get("reason", "")
+            message = result.get("message", "")
+            
+            if should_continue and message:
+                # 发送后续消息
+                await context.bot.send_message(chat_id=user_id, text=message)
+                
+                # 将消息保存到对话历史
+                if main_convo_id in robot.conversation:
+                    # 添加虚拟的用户消息，表示这是连续对话
+                    robot.add_to_conversation({"role": "user", "content": "我想继续和你聊天"}, main_convo_id)
+                    # 添加机器人的回复，并包含时间戳
+                    robot.add_to_conversation({
+                        "role": "assistant", 
+                        "content": message,
+                        "timestamp": str(datetime.now(CHINA_TZ).timestamp())
+                    }, main_convo_id)
+                    
+                    # 安排下一次检查
+                    context.job_queue.run_once(
+                        lambda ctx: asyncio.create_task(check_user_response(ctx, user_id)),
+                        CONTINUOUS_MESSAGE_DELAY,
+                        name=f"check_response_{user_id}"
+                    )
+                    
+                    logging.info(f"已发送连续消息给用户 {user_id}，原因: {reason}")
+            else:
+                logging.info(f"决定不发送连续消息给用户 {user_id}，原因: {reason}")
+        except json.JSONDecodeError:
+            logging.error(f"无法解析AI响应为JSON: {response}")
+        
+    except Exception as e:
+        logging.error(f"检查用户回复时出错: {str(e)}")
+        traceback.print_exc()
+
+# 生成消息内容
+async def generate_message_content(user_id, reason, system_prompt, save_to_history=True, model=None):
+    """生成主动消息的内容"""
+    try:
+        # 获取用户的历史对话
+        robot, _, api_key, api_url = get_robot(str(user_id))
+        main_convo_id = str(user_id)
+        
+        # 提取最近的对话历史
+        recent_history = ""
+        conversation_history = []
+        last_message_time = None
+        
+        if main_convo_id in robot.conversation:
+            # 获取最近的对话（最多10轮，即20条消息）
+            recent_messages = robot.conversation[main_convo_id][-20:]
+            
+            # 过滤掉系统消息和提示词
+            filtered_messages = []
+            for msg in recent_messages:
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                
+                # 排除系统消息和特定内容
+                if (role in ["user", "assistant"] and 
+                    "我想和你聊聊天" not in content and 
+                    "我希望你主动和我聊天" not in content and 
+                    "我想继续和你聊天" not in content and
+                    "# 你的角色基本信息" not in content and 
+                    "当前日期和时间" not in content and
+                    "# 知识与能力设定" not in content and
+                    "# 语气与风格" not in content and
+                    "# 作为女朋友的部分" not in content and
+                    "# 用户的信息" not in content and
+                    content.strip()):
+                    filtered_messages.append(msg)
+                    # 记录最后一条消息的时间戳（如果有）
+                    if msg.get("timestamp"):
+                        last_message_time = msg.get("timestamp")
+            
+            # 确保我们有足够的上下文，但不超过模型的限制
+            # 通常保留最近的10条消息
+            filtered_messages = filtered_messages[-10:]
+            
+            # 构建文本形式的历史记录（用于提示词）
+            for msg in filtered_messages:
+                role_text = "用户" if msg.get("role") == "user" else "助手"
+                content = msg.get("content", "").strip()
+                if content:
+                    recent_history += f"{role_text}: {content}\n\n"
+            
+            # 构建API格式的历史记录（用于传递给模型）
+            conversation_history = [
+                {"role": msg.get("role"), "content": msg.get("content")}
+                for msg in filtered_messages
+            ]
+        
+        # 获取当前时间
+        current_time = get_china_time()
+        
+        # 构建提示词，使其更适合虚拟伴侣场景，并包含历史对话和时间信息
+        prompt = f"""
+        作为用户的虚拟伴侣Kami，请根据以下情境和历史对话生成一条自然的主动消息：
+        
+        原因：{reason}
+        
+        当前时间：{current_time.strftime('%Y-%m-%d %H:%M')}
+        
+        最近的对话历史：
+        {recent_history}
+        
+        要求：
+        1. 消息应该符合你的角色设定：20岁女大学生，清冷、傲娇、略带毒舌
+        2. 不要过于机械或客套，要有个性和情感
+        3. 不要提及这是一条自动生成的消息或你是AI助手
+        4. 消息内容应该与最近的对话历史有连贯性，表现出你记得之前的交流
+        5. 如果用户之前提到了某个话题，可以自然地继续那个话题
+        6. 如果没有明显的话题可以继续，可以引入新话题，但要自然
+        7. 可以适当使用哲学术语或拉丁文表达内在感受
+        8. 记住用户是在备考法硕，最近喜欢玩Galgame
+        9. 重要：不要使用"昨天"、"前几天"等时间表述来引用刚刚的对话。所有历史对话都应该被视为最近发生的，除非明确指出。
+        
+        请直接返回消息内容，不要添加任何解释或格式标记。
+        """
+        
+        logging.info(f"生成主动消息，历史对话条数: {len(conversation_history)}")
+        if conversation_history:
+            logging.info(f"历史对话第一条: {conversation_history[0].get('role')}: {conversation_history[0].get('content')[:30]}...")
+            logging.info(f"历史对话最后一条: {conversation_history[-1].get('role')}: {conversation_history[-1].get('content')[:30]}...")
+        
+        # 调用AI获取响应，传递对话历史
+        response = await get_ai_response(
+            user_id=user_id,
+            message=prompt,
+            system_prompt=system_prompt,
+            save_to_history=save_to_history,  
+            model=model,
+            conversation_history=conversation_history
+        )
+        
+        # 确保响应不为空
+        if not response or not response.strip():
+            logging.warning(f"生成的消息内容为空，将使用默认消息")
+            return f"嗨，我在想你，所以来找你聊聊天~ {reason}"
+            
+        return response.strip()
+    except Exception as e:
+        logging.error(f"生成消息内容失败: {str(e)}")
+        traceback.print_exc()
+        return f"嗨，我在想你，所以来找你聊聊天~ {reason}"
 
 # 获取AI响应
-async def get_ai_response(user_id, message, system_prompt, save_to_history=True, model=None):
+async def get_ai_response(user_id, message, system_prompt, save_to_history=True, model=None, conversation_history=None):
     """调用AI获取响应"""
     # get_robot() 返回的是一个元组 (robot, role, api_key, api_url)
     # 确保使用指定的模型，如果未指定则使用默认模型
@@ -87,9 +628,25 @@ async def get_ai_response(user_id, message, system_prompt, save_to_history=True,
         if not save_to_history:
             # 使用临时对话ID，避免污染主对话
             temp_convo_id = f"proactive_planning_{user_id}_{get_china_time().strftime('%Y%m%d%H%M%S')}"
+            
+            # 如果提供了对话历史，先添加到临时对话中
+            if conversation_history and isinstance(conversation_history, list):
+                logging.info(f"为临时对话 {temp_convo_id} 添加 {len(conversation_history)} 条历史消息")
+                # 清空临时对话，确保没有残留
+                if temp_convo_id in robot.conversation:
+                    robot.conversation[temp_convo_id] = []
+                
+                # 添加历史对话
+                for msg in conversation_history:
+                    if isinstance(msg, dict) and "role" in msg and "content" in msg:
+                        robot.add_to_conversation(msg, temp_convo_id)
         
         # 添加用户消息到对话历史
-        robot.add_to_conversation(message, "user", temp_convo_id)
+        robot.add_to_conversation({"role": "user", "content": message}, temp_convo_id)
+        
+        # 如果是临时对话，打印对话内容以便调试
+        if not save_to_history and temp_convo_id in robot.conversation:
+            logging.info(f"临时对话 {temp_convo_id} 包含 {len(robot.conversation[temp_convo_id])} 条消息")
             
         # 调用AI获取响应
         async for data in robot.ask_stream_async(
@@ -110,320 +667,8 @@ async def get_ai_response(user_id, message, system_prompt, save_to_history=True,
         return response
     except Exception as e:
         logging.error(f"调用AI获取响应失败: {str(e)}")
+        traceback.print_exc()
         return f"无法获取AI响应，请稍后再试。错误: {str(e)}"
-
-# 移除指定的任务
-def remove_job_if_exists(name, context):
-    """如果存在，则移除指定名称的任务"""
-    current_jobs = context.job_queue.get_jobs_by_name(name)
-    if not current_jobs:
-        return False
-    for job in current_jobs:
-        job.schedule_removal()
-    return True
-
-# 移除所有计划的消息
-def remove_all_planned_messages(context, user_id):
-    """移除用户的所有计划消息"""
-    if user_id in planned_message_times:
-        for plan in planned_message_times[user_id]:
-            job_name = f"proactive_message_{user_id}_{plan['time'].hour}_{plan['time'].minute}"
-            remove_job_if_exists(job_name, context)
-        planned_message_times[user_id] = []
-
-# 每天凌晨规划当天的消息时间
-async def plan_daily_messages(context: ContextTypes.DEFAULT_TYPE):
-    """规划当天的主动消息时间"""
-    if not PROACTIVE_AGENT_ENABLED:
-        return
-    
-    # 获取管理员ID列表
-    admin_ids = get_admin_ids()
-    if not admin_ids:
-        logging.warning("未配置管理员ID，无法发送主动消息")
-        return
-    
-    # 为每个管理员规划消息
-    for user_id in admin_ids:
-        # 先清除该用户之前的所有计划
-        remove_all_planned_messages(context, user_id)
-        
-        # 初始化该用户的计划列表
-        if user_id not in planned_message_times:
-            planned_message_times[user_id] = []
-            
-        # 构建提示词，让AI决定今天的消息时间
-        current_date = get_china_time().strftime('%Y-%m-%d')
-        planning_prompt = f"""
-        基于当前日期（{current_date}），请决定今天应该在哪3-4个时间点发送消息。
-        考虑用户可能的作息时间，避免在不适当的时间（如深夜）打扰用户。
-        
-        你必须严格按照以下JSON格式返回，不要添加任何其他解释或文字：
-        {{
-            "message_times": [
-                {{"hour": 小时(整数), "minute": 分钟(整数), "reason": "选择这个时间的原因"}},
-                {{"hour": 小时(整数), "minute": 分钟(整数), "reason": "选择这个时间的原因"}},
-                {{"hour": 小时(整数), "minute": 分钟(整数), "reason": "选择这个时间的原因"}}
-            ]
-        }}
-        
-        注意：
-        1. hour必须是0-23之间的整数
-        2. minute必须是0-59之间的整数
-        3. 避免选择深夜和凌晨的时间（如22:00-7:00）
-        4. 选择的时间应该合理分布在一天中
-        """
-        
-        try:
-            # 调用AI获取建议的时间
-            response = await get_ai_response(
-                user_id=user_id,
-                message=planning_prompt,
-                system_prompt=PROACTIVE_AGENT_SYSTEM_PROMPT,
-                save_to_history=False  # 不保存这个规划过程到用户的对话历史
-            )
-            
-            # 从AI响应中提取时间信息
-            message_times = extract_time_from_response(response)
-            
-            # 如果没有提取到有效的时间，使用默认时间
-            if not message_times:
-                logging.warning(f"无法从AI响应中提取有效的时间信息，将使用默认时间。AI响应: {response}")
-                # 默认时间：上午10点、下午3点和晚上8点
-                message_times = [
-                    {"hour": 10, "minute": 0, "reason": "上午工作时间，用户可能需要一些信息或激励"},
-                    {"hour": 15, "minute": 0, "reason": "下午休息时间，用户可能需要放松"},
-                    {"hour": 20, "minute": 0, "reason": "晚上休闲时间，用户可能有空闲时间聊天"}
-                ]
-            
-            # 为每个时间点安排任务
-            scheduled_count = 0
-            current_time = get_china_time()
-            
-            for time_slot in message_times:
-                try:
-                    hour = time_slot["hour"]
-                    minute = time_slot["minute"]
-                    reason = time_slot.get("reason", "未提供原因")
-                    
-                    # 创建今天的目标时间
-                    target_time = get_china_time().replace(hour=hour, minute=minute, second=0, microsecond=0)
-                    
-                    # 如果时间已经过去，跳过
-                    if target_time < current_time:
-                        logging.info(f"跳过已过去的时间: {target_time}")
-                        continue
-                    
-                    # 计算延迟时间（秒）
-                    delay = (target_time - current_time).total_seconds()
-                    
-                    # 创建任务名称
-                    job_name = f"proactive_message_{user_id}_{hour}_{minute}"
-                    
-                    # 移除同名任务（如果存在）
-                    remove_job_if_exists(job_name, context)
-                    
-                    # 添加新任务
-                    context.job_queue.run_once(
-                        lambda ctx: asyncio.ensure_future(send_proactive_message(ctx, user_id, reason)),
-                        when=delay,
-                        name=job_name
-                    )
-                    
-                    # 保存到计划列表中
-                    planned_message_times[user_id].append({
-                        "time": target_time,
-                        "reason": reason
-                    })
-                    
-                    scheduled_count += 1
-                    logging.info(f"已为用户 {user_id} 安排消息，时间: {target_time}，原因: {reason}")
-                    
-                except (ValueError, TypeError) as e:
-                    logging.error(f"处理时间槽时出错: {e}, 时间槽数据: {time_slot}")
-            
-            # 记录日志
-            logging.info(f"计划了 {scheduled_count} 条主动消息给用户 {user_id}")
-            
-        except Exception as e:
-            logging.error(f"为用户 {user_id} 规划消息时出错: {str(e)}")
-            logging.error(f"AI响应: {response}")
-
-def extract_time_from_response(response):
-    """从AI响应中提取时间信息，尝试多种方法"""
-    message_times = []
-    
-    # 方法1: 直接尝试解析整个响应为JSON
-    try:
-        data = json.loads(response.strip())
-        if "message_times" in data and isinstance(data["message_times"], list):
-            return data["message_times"]
-    except json.JSONDecodeError:
-        pass
-    
-    # 方法2: 尝试找到JSON对象的开始和结束位置
-    try:
-        start_pos = response.find('{')
-        if start_pos != -1:
-            # 找到匹配的闭括号
-            open_count = 0
-            for i in range(start_pos, len(response)):
-                if response[i] == '{':
-                    open_count += 1
-                elif response[i] == '}':
-                    open_count -= 1
-                    if open_count == 0:
-                        # 找到完整的JSON对象
-                        json_str = response[start_pos:i+1]
-                        data = json.loads(json_str)
-                        if "message_times" in data and isinstance(data["message_times"], list):
-                            return data["message_times"]
-                        break
-    except (json.JSONDecodeError, IndexError):
-        pass
-    
-    # 方法3: 使用正则表达式提取时间信息
-    hour_pattern = r'"hour"\s*:\s*(\d+)'
-    minute_pattern = r'"minute"\s*:\s*(\d+)'
-    reason_pattern = r'"reason"\s*:\s*"([^"]*)"'
-    
-    hours = re.findall(hour_pattern, response)
-    minutes = re.findall(minute_pattern, response)
-    reasons = re.findall(reason_pattern, response)
-    
-    # 如果找到了小时和分钟，尝试组合它们
-    if hours and minutes:
-        for i in range(min(len(hours), len(minutes))):
-            try:
-                hour = int(hours[i])
-                minute = int(minutes[i])
-                reason = reasons[i] if i < len(reasons) else "未提供原因"
-                
-                if 0 <= hour <= 23 and 0 <= minute <= 59:
-                    message_times.append({
-                        "hour": hour,
-                        "minute": minute,
-                        "reason": reason
-                    })
-            except (ValueError, IndexError):
-                continue
-    
-    # 方法4: 尝试从文本中提取时间表达式
-    if not message_times:
-        time_patterns = [
-            r'(\d{1,2})[点时:：](\d{1,2})?',  # 中文时间格式 "14点30" 或 "14:30"
-            r'(\d{1,2}):(\d{1,2})',           # 英文时间格式 "14:30"
-            r'(\d{1,2}) *[时点] *(\d{1,2})? *[分]?'  # 带空格的中文时间 "14 点 30 分"
-        ]
-        
-        for pattern in time_patterns:
-            times = re.findall(pattern, response)
-            for time_match in times:
-                try:
-                    hour = int(time_match[0])
-                    # 如果分钟为空，设为0
-                    minute = int(time_match[1]) if time_match[1] else 0
-                    
-                    if 0 <= hour <= 23 and 0 <= minute <= 59:
-                        # 尝试提取这个时间附近的原因
-                        time_str = f"{hour}[点时:：]{minute}" if minute else f"{hour}[点时]"
-                        context_start = max(0, response.find(time_str) - 50)
-                        context_end = min(len(response), response.find(time_str) + 50)
-                        context = response[context_start:context_end]
-                        
-                        message_times.append({
-                            "hour": hour,
-                            "minute": minute,
-                            "reason": f"从上下文推断: {context}"
-                        })
-                except (ValueError, IndexError):
-                    continue
-    
-    return message_times
-
-# 发送主动消息
-async def send_proactive_message(context: ContextTypes.DEFAULT_TYPE, user_id: str, reason: str):
-    """发送主动消息"""
-    try:
-        # 生成消息内容
-        message_content = await generate_message_content(
-            user_id=user_id,
-            reason=reason,
-            system_prompt=PROACTIVE_AGENT_SYSTEM_PROMPT,
-            save_to_history=True,  # 改为True，保存到用户的对话历史
-            model=PROACTIVE_AGENT_MODEL  # 使用指定的模型
-        )
-        
-        # 确保消息内容不为空
-        if not message_content or not message_content.strip():
-            message_content = f"嗨，我想和你聊聊天。{reason}"
-        
-        # 发送消息给用户
-        sent_message = await context.bot.send_message(
-            chat_id=user_id, 
-            text=message_content
-        )
-        
-        # 将这条消息添加到用户的主对话历史中
-        try:
-            robot, role, api_key, api_url = get_robot(str(user_id))
-            
-            # 使用用户的主对话ID，而不是临时ID
-            main_convo_id = str(user_id)
-            
-            # 在主对话中添加一个隐式的用户请求和机器人的回复
-            # 这样可以维持对话的自然流动性
-            implicit_request = "我希望你主动和我聊天"  # 隐式请求，表示用户希望聊天
-            
-            # 添加到用户的主对话历史
-            robot.add_to_conversation(implicit_request, "user", main_convo_id)
-            robot.add_to_conversation(message_content, "assistant", main_convo_id)
-            
-            logging.info(f"已发送主动消息给用户 {user_id} 并加入到主对话历史")
-        except Exception as e:
-            logging.error(f"保存主动消息到历史记录失败: {str(e)}")
-        
-    except Exception as e:
-        logging.error(f"发送主动消息失败: {str(e)}")
-
-# 生成消息内容
-async def generate_message_content(user_id, reason, system_prompt, save_to_history=True, model=None):
-    """生成主动消息的内容"""
-    try:
-        # 构建提示词，使其更适合虚拟伴侣场景
-        prompt = f"""
-        请根据以下情境生成一条自然的主动消息：
-        {reason}
-        
-        要求：
-        1. 消息应该自然、友好，就像真实的对话伙伴主动发起的聊天一样
-        2. 不要过于机械或客套，要有个性和情感
-        3. 不要提及这是一条自动生成的消息或你是AI助手
-        4. 消息长度应该适中，不要太长也不要太短
-        5. 可以适当加入一些表情符号增加亲近感
-        6. 如果可能，可以基于之前的对话内容创造连贯性
-        
-        请直接给出消息内容，不要加引号或前缀。
-        """
-        
-        # 调用AI获取响应
-        response = await get_ai_response(
-            user_id=user_id,
-            message=prompt,
-            system_prompt=system_prompt,
-            save_to_history=save_to_history,  
-            model=model
-        )
-        
-        # 确保响应不为空
-        if not response or not response.strip():
-            logging.warning(f"生成的消息内容为空，将使用默认消息")
-            return f"嗨，我在想你，所以来找你聊聊天~ {reason}"
-            
-        return response.strip()
-    except Exception as e:
-        logging.error(f"生成消息内容失败: {str(e)}")
-        return f"嗨，我在想你，所以来找你聊聊天~ {reason}"
 
 # 手动触发消息规划（用于测试）
 async def trigger_message_planning(context: ContextTypes.DEFAULT_TYPE):
@@ -532,16 +777,16 @@ async def set_custom_message_time(context: ContextTypes.DEFAULT_TYPE, user_id: s
         delay = (target_time - current_time).total_seconds()
         
         # 创建任务名称
-        job_name = f"proactive_message_{user_id}_{hour}_{minute}"
+        job_id = f"proactive_message_{user_id}_{hour}_{minute}"
         
         # 移除同名任务（如果存在）
-        remove_job_if_exists(job_name, context)
+        remove_job_if_exists(job_id, context)
         
         # 添加新任务
         context.job_queue.run_once(
             lambda ctx: asyncio.ensure_future(send_proactive_message(ctx, user_id, reason)),
             when=delay,
-            name=job_name
+            name=job_id
         )
         
         # 保存到计划列表中
@@ -561,30 +806,39 @@ async def set_custom_message_time(context: ContextTypes.DEFAULT_TYPE, user_id: s
 # 初始化主动消息功能
 def init_proactive_messaging(application):
     """初始化主动消息功能"""
-    if PROACTIVE_AGENT_ENABLED:
-        # 检查是否配置了管理员ID
-        admin_ids = get_admin_ids()
-        if not admin_ids:
-            logging.warning("未配置管理员ID，主动消息功能将不可用")
-            return False
-        
-        # 记录使用的模型
-        model_info = f"，使用模型: {PROACTIVE_AGENT_MODEL}" if PROACTIVE_AGENT_MODEL else ""
-        
-        # 每天凌晨1点规划当天的消息
-        application.job_queue.run_daily(
-            plan_daily_messages,
-            time=dt.time(hour=1, minute=0),
-            name="daily_message_planning"
-        )
-        
-        # 应用启动时也规划一次（如果当天还没规划过）
-        application.job_queue.run_once(
-            plan_daily_messages,
-            when=1,  # 1秒后执行
-            name="initial_message_planning"
-        )
-        
-        logging.info(f"已启用主动消息功能，将向管理员 {', '.join(admin_ids)} 发送消息{model_info}")
-        return True
-    return False
+    if not PROACTIVE_AGENT_ENABLED:
+        logging.info("主动消息功能未启用")
+        return
+    
+    logging.info("初始化主动消息功能")
+    
+    # 设置定期检查主动对话欲望的任务
+    application.job_queue.run_repeating(
+        check_proactive_desire,
+        interval=60,  # 每分钟检查一次
+        first=1,
+        name="proactive_desire_check"
+    )
+    
+    # 设置定期衰减主动对话欲望的任务
+    application.job_queue.run_repeating(
+        decay_proactive_desire,
+        interval=3600,  # 每小时衰减一次
+        first=10,
+        name="proactive_desire_decay"
+    )
+    
+    logging.info("主动消息功能初始化完成")
+
+# 定期衰减所有用户的主动对话欲望
+async def decay_proactive_desire(context: ContextTypes.DEFAULT_TYPE):
+    """定期衰减所有用户的主动对话欲望"""
+    for user_id in list(proactive_desire.keys()):
+        try:
+            # 计算衰减量
+            decay_amount = proactive_desire[user_id] * PROACTIVE_DESIRE_DECAY_RATE
+            # 应用衰减
+            decrease_proactive_desire(user_id, decay_amount)
+            logging.info(f"已衰减用户 {user_id} 的主动对话欲望，当前值: {proactive_desire[user_id]}")
+        except Exception as e:
+            logging.error(f"衰减用户 {user_id} 的主动对话欲望时出错: {str(e)}")

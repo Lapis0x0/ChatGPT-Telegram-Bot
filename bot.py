@@ -100,9 +100,12 @@ async def command_bot(update, context, language=None, prompt=translator_prompt, 
 
     # 异步处理记忆，但不阻塞主对话流程
     if not has_command and config.ChatGPTbot is not None and message is not None:
-        # 只使用track_conversation跟踪对话，它会在达到15轮后自动总结
-        # 移除对每条消息的即时分析，避免重复处理和API调用
+        # 跟踪对话，它会在达到一定轮数后自动总结
         asyncio.create_task(track_conversation(str(convo_id), "user", message, config.ChatGPTbot))
+        
+        # 分析用户消息并调整主动对话欲望
+        if proactive_messaging.PROACTIVE_AGENT_ENABLED:
+            asyncio.create_task(proactive_messaging.analyze_message_for_desire(chatid, message))
 
     if has_command == False or len(context.args) > 0:
         if has_command:
