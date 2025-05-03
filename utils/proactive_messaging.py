@@ -89,6 +89,11 @@ def apply_desire_decay(user_id: str):
     # 获取上次对话时间
     last_chat = last_user_chat_time.get(user_id, current_time - timedelta(hours=1))
     
+    # 确保 last_chat 有时区信息
+    if last_chat.tzinfo is None:
+        # 如果没有时区信息，添加东八区时区
+        last_chat = CHINA_TZ.localize(last_chat)
+    
     # 计算时间差（小时）
     time_diff_hours = (current_time - last_chat).total_seconds() / 3600
     
@@ -257,6 +262,11 @@ async def check_proactive_desire(context: ContextTypes.DEFAULT_TYPE):
                 
                 # 获取上次发送主动消息的时间
                 last_proactive_time = getattr(robot, 'last_proactive_time', {}).get(user_id, datetime.fromtimestamp(0))
+                
+                # 确保 last_proactive_time 有时区信息
+                if last_proactive_time.tzinfo is None:
+                    # 如果没有时区信息，添加东八区时区
+                    last_proactive_time = CHINA_TZ.localize(last_proactive_time)
                 
                 # 计算距离上次主动消息的时间（小时）
                 hours_since_last_proactive = (current_time - last_proactive_time).total_seconds() / 3600
