@@ -294,6 +294,22 @@ async def getChatGPT(update_message, context, title, robot, message, chatid, mes
     if "gemini" in model_name and (GOOGLE_AI_API_KEY or (VERTEX_CLIENT_EMAIL and VERTEX_PRIVATE_KEY and VERTEX_PROJECT_ID)):
         Frequency_Modification = 1
 
+    # 添加当前时间戳到用户消息
+    current_datetime = datetime.now(CHINA_TZ)
+    message_timestamp = current_datetime.timestamp()
+    formatted_time = current_datetime.strftime("%Y-%m-%d %H:%M")
+    
+    # 将用户消息添加到对话历史时包含时间戳，并在内容中显示时间
+    if not pass_history:
+        # 在消息内容前添加时间信息
+        text_with_time = f"[{formatted_time}] {text}"
+        
+        robot.add_to_conversation({
+            "role": "user", 
+            "content": text_with_time,
+            "timestamp": str(message_timestamp),
+            "formatted_time": formatted_time
+        }, convo_id)
 
     if not await is_bot_blocked(context.bot, chatid):
         answer_messageid = (await context.bot.send_message(
@@ -437,26 +453,7 @@ async def getChatGPT(update_message, context, title, robot, message, chatid, mes
                         lastresult = escape(send_split_message, italic=False)
                     except Exception as e:
                         if "parse entities" in str(e):
-                            await context.bot.edit_message_text(
-                                chat_id=chatid,
-                                message_id=answer_messageid,
-                                text=send_split_message,
-                                disable_web_page_preview=True,
-                                read_timeout=time_out,
-                                write_timeout=time_out,
-                                pool_timeout=time_out,
-                                connect_timeout=time_out
-                            )
-                            print("error:", send_split_message)
-                        else:
-                            print("error:", str(e))
-                answer_messageid = (await context.bot.send_message(
-                    chat_id=chatid,
-                    message_thread_id=message_thread_id,
-                    text=escape(strings['message_think'][get_current_lang(convo_id)]),
-                    parse_mode='MarkdownV2',
-                    reply_to_message_id=messageid,
-                )).message_id
+                            await context.bot.edit_message_text(chat_id=chatid, message_id=answer_messageid, text=send_split_message, disable_web_page_preview=True, read_timeout=time_out, write_timeout=time_out, pool_timeout=time_out, connect_timeout=time_out)
 
             # 如果不是可能的JSON格式，则进行正常的流式更新
             if not might_be_json:
@@ -474,6 +471,23 @@ async def getChatGPT(update_message, context, title, robot, message, chatid, mes
             
         # 当完成对话生成后，跟踪机器人的回复
         try:
+            # 添加当前时间戳到机器人回复
+            current_datetime = datetime.now(CHINA_TZ)
+            response_timestamp = current_datetime.timestamp()
+            formatted_time = current_datetime.strftime("%Y-%m-%d %H:%M")
+            
+            # 将机器人回复添加到对话历史时包含时间戳，并在内容中显示时间
+            if not pass_history:
+                # 在回复内容前添加时间信息
+                result_with_time = f"[{formatted_time}] {result}"
+                
+                robot.add_to_conversation({
+                    "role": "assistant", 
+                    "content": result_with_time,
+                    "timestamp": str(response_timestamp),
+                    "formatted_time": formatted_time
+                }, convo_id)
+            
             asyncio.create_task(track_conversation(str(convo_id), "assistant", result, robot))
         except Exception as e:
             # 即使记忆跟踪失败，也不影响主对话
@@ -1015,6 +1029,7 @@ async def post_init(application: Application) -> None:
         BotCommand('memories', 'List all memories'),
         BotCommand('forget', 'Forget a memory'),
         BotCommand('summarize_memory', 'Summarize current conversation memory'),
+        BotCommand('desire', 'View current desire'),
     ])
     description = (
         "I am an Assistant, a large language model trained by OpenAI. I will do my best to help answer your questions."
@@ -1198,6 +1213,13 @@ async def summarize_memory(update, context):
         text=result
     )
 
+@decorators.GroupAuthorization
+@decorators.Authorization
+@decorators.APICheck
+async def view_desire(update, context):
+    """查看当前主动对话欲望值"""
+    await proactive_messaging.view_proactive_desire(update, context)
+
 if __name__ == '__main__':
     application = (
         ApplicationBuilder()
@@ -1232,6 +1254,7 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("memories", memories))
     application.add_handler(CommandHandler("forget", forget))
     application.add_handler(CommandHandler("summarize_memory", summarize_memory))
+    application.add_handler(CommandHandler("desire", view_desire))
     application.add_handler(InlineQueryHandler(inlinequery))
     application.add_handler(CallbackQueryHandler(button_press))
     application.add_handler(MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, lambda update, context: command_bot(update, context, prompt=None, has_command=False), block = False))

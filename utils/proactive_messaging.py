@@ -982,6 +982,73 @@ async def set_custom_message_time(context: ContextTypes.DEFAULT_TYPE, user_id: s
         logging.error(f"手动设置消息时间时出错: {str(e)}")
         return f"设置消息时间失败：{str(e)}"
 
+# 查看当前主动对话欲望
+async def view_proactive_desire(update, context):
+    """查看当前主动对话欲望值
+    
+    参数：
+        update: Telegram更新对象
+        context: Telegram上下文
+    
+    返回：
+        无
+    """
+    try:
+        # 获取用户ID
+        chatid = update.effective_chat.id
+        user_id = str(chatid)
+        
+        # 初始化用户的主动对话欲望（如果不存在）
+        init_proactive_desire(user_id)
+        
+        # 获取当前欲望值
+        desire = proactive_desire.get(user_id, 0.0)
+        
+        # 获取用户活跃度
+        activity = user_activity_index.get(user_id, 0.5)
+        
+        # 获取当前时间
+        current_time = get_china_time()
+        
+        # 获取上次检查时间
+        last_check = last_desire_check_time.get(user_id, current_time)
+        
+        # 计算距离上次检查的时间（小时）
+        hours_since_last_check = (current_time - last_check).total_seconds() / 3600
+        
+        # 获取上次对话时间
+        last_chat = last_user_chat_time.get(user_id, current_time)
+        
+        # 计算距离上次对话的时间（小时）
+        hours_since_last_chat = (current_time - last_chat).total_seconds() / 3600
+        
+        # 构建回复消息
+        message = f"📊 **主动对话欲望状态**\n\n"
+        message += f"当前欲望值: {desire:.2f} / {PROACTIVE_DESIRE_THRESHOLD:.2f} (阈值)\n"
+        message += f"用户活跃度: {activity:.2f}\n"
+        message += f"距上次对话: {hours_since_last_chat:.1f} 小时\n"
+        
+        # 预测下一次可能的主动消息时间
+        if desire < PROACTIVE_DESIRE_THRESHOLD:
+            # 计算还需多少小时达到阈值
+            growth_rate = PROACTIVE_DESIRE_GROWTH_RATE * (1.0 - activity * 0.5)  # 基于活跃度调整增长率
+            hours_to_threshold = (PROACTIVE_DESIRE_THRESHOLD - desire) / growth_rate
+            estimated_time = current_time + timedelta(hours=hours_to_threshold)
+            message += f"\n预计下次主动消息: {estimated_time.strftime('%Y-%m-%d %H:%M')} (约 {hours_to_threshold:.1f} 小时后)"
+        else:
+            message += f"\n当前欲望值已超过阈值，可能很快发送主动消息"
+        
+        # 发送消息
+        await context.bot.send_message(chat_id=chatid, text=message)
+        
+    except Exception as e:
+        logging.error(f"查看主动对话欲望时出错: {str(e)}")
+        traceback.print_exc()
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"查看主动对话欲望时出错: {str(e)}"
+        )
+
 # 初始化主动消息功能
 def init_proactive_messaging(application):
     """初始化主动消息功能"""
