@@ -626,146 +626,36 @@ async def generate_message_content(user_id, reason, system_prompt, save_to_histo
         # 获取当前时间
         current_time = get_china_time()
         
-        # 获取用户活跃度和对话深度指数
-        activity = user_activity_index.get(user_id, 0.5)
-        depth = conversation_depth_index.get(user_id, 0.5)
+        # 构建用户消息提示词，让模型自主决策对话方向
+        user_prompt = f"""
+        请生成一条自然的主动消息，主动与我开始对话。
         
-        # 根据用户活跃度和对话深度确定消息类型
-        message_type = "general"
-        
-        # 分析历史对话中的主题和情感
-        topics = []
-        emotions = []
-        
-        # 简单的主题和情感提取
-        if conversation_history:
-            # 提取最近5条消息中的关键词作为可能的主题
-            for msg in conversation_history[-5:]:
-                content = msg.get("content", "").lower()
-                # 检查常见主题
-                if "学习" in content or "考试" in content or "法硕" in content:
-                    topics.append("学习")
-                if "游戏" in content or "galgame" in content:
-                    topics.append("游戏")
-                if "电影" in content or "电视" in content or "看剧" in content:
-                    topics.append("娱乐")
-                if "吃" in content or "食物" in content or "美食" in content:
-                    topics.append("美食")
-                if "天气" in content or "下雨" in content or "晴天" in content:
-                    topics.append("天气")
-                
-                # 检查情感词
-                if any(word in content for word in ["开心", "高兴", "快乐", "喜欢"]):
-                    emotions.append("积极")
-                if any(word in content for word in ["难过", "伤心", "痛苦", "烦恼"]):
-                    emotions.append("消极")
-                if any(word in content for word in ["疲惫", "累", "困"]):
-                    emotions.append("疲惫")
-        
-        # 去重
-        topics = list(set(topics))
-        emotions = list(set(emotions))
-        
-        # 根据分析结果确定消息类型
-        if topics:
-            # 有明确主题，可以继续讨论
-            message_type = "topic_continuation"
-        elif not conversation_history or len(conversation_history) < 3:
-            # 没有太多历史对话，使用问候型消息
-            message_type = "greeting"
-        elif activity > 0.7:
-            # 用户活跃度高，可以尝试深入话题
-            message_type = "deep_conversation"
-        elif "疲惫" in emotions:
-            # 用户可能疲惫，发送关心型消息
-            message_type = "caring"
-        else:
-            # 默认使用一般型消息
-            message_type = "general"
-        
-        # 根据时间调整消息类型
-        hour = current_time.hour
-        if 6 <= hour < 9:
-            # 早上更可能发送问候
-            if random.random() < 0.7:
-                message_type = "morning_greeting"
-        elif 22 <= hour or hour < 1:
-            # 晚上更可能发送晚安
-            if random.random() < 0.5:
-                message_type = "night_greeting"
-        
-        # 构建提示词，使其更适合虚拟伴侣场景，并包含历史对话和时间信息
-        prompt = f"""
-        作为用户的虚拟伴侣Kami，请根据以下情境和历史对话生成一条自然的主动消息：
-        
-        消息类型: {message_type}
         原因: {reason}
         当前时间: {current_time.strftime('%Y-%m-%d %H:%M')}
         
         最近的对话历史:
         {recent_history}
         
-        """
-        
-        # 根据消息类型添加特定指导
-        if message_type == "topic_continuation":
-            prompt += f"""
-            检测到的主题: {', '.join(topics)}
-            检测到的情感: {', '.join(emotions) if emotions else '中性'}
-            
-            请基于这些主题继续对话，但不要直接提及"我注意到你在谈论XX"，而是自然地引入话题。
-            """
-        elif message_type == "greeting":
-            prompt += """
-            生成一条自然的问候消息，可以询问用户的近况或分享一些有趣的想法。
-            """
-        elif message_type == "deep_conversation":
-            prompt += """
-            生成一条能引发深度思考或情感共鸣的消息，可以是哲学思考、人生感悟或情感表达。
-            """
-        elif message_type == "caring":
-            prompt += """
-            生成一条关心用户的消息，表达对用户的关心和支持。
-            """
-        elif message_type == "morning_greeting":
-            prompt += """
-            生成一条早晨问候，可以包含对新一天的期待或建议。
-            """
-        elif message_type == "night_greeting":
-            prompt += """
-            生成一条晚安消息，可以包含对用户休息的关心或对明天的期待。
-            """
-        else:
-            prompt += """
-            生成一条一般性的主动消息，可以是分享想法、询问近况或表达情感。
-            """
-        
-        prompt += """
-        要求：
-        1. 消息应该符合你的角色设定：20岁女大学生，清冷、傲娇、略带毒舌
-        2. 不要过于机械或客套，要有个性和情感
-        3. 不要提及这是一条自动生成的消息或你是AI助手
-        4. 消息内容应该与最近的对话历史有连贯性，表现出你记得之前的交流
-        5. 如果用户之前提到了某个话题，可以自然地继续那个话题
-        6. 如果没有明显的话题可以继续，可以引入新话题，但要自然
-        7. 可以适当使用哲学术语或拉丁文表达内在感受
-        8. 记住用户是在备考法硕，最近喜欢玩Galgame
-        9. 重要：不要使用"昨天"、"前几天"等时间表述来引用刚刚的对话。所有历史对话都应该被视为最近发生的，除非明确指出。
-        10. 消息长度应该适中，不要太长也不要太短，通常在20-60个字之间较为自然。
+        在生成消息时，请注意：
+        1. 自主判断是否继续最近的对话话题，或引入新的可能感兴趣的话题
+        2. 如果决定继续现有话题，确保消息内容与最近的对话历史有连贯性
+        3. 如果决定引入新话题(建议主动引入新话题），选择你最近正在研究的内容/用户可能感兴趣的话题，但不要生硬转换
+        4. 根据当前时间适当调整消息内容（如早上问候、晚上道晚安等）
+        5. 不要提及这是一条自动生成的消息或你是AI助手
         
         请直接返回消息内容，不要添加任何解释或格式标记。
         """
         
-        logging.info(f"生成主动消息，类型: {message_type}, 历史对话条数: {len(conversation_history)}")
+        logging.info(f"生成主动消息，历史对话条数: {len(conversation_history)}")
         if conversation_history:
             logging.info(f"历史对话第一条: {conversation_history[0].get('role')}: {conversation_history[0].get('content')[:30]}...")
             logging.info(f"历史对话最后一条: {conversation_history[-1].get('role')}: {conversation_history[-1].get('content')[:30]}...")
         
-        # 调用AI获取响应，传递对话历史
+        # 调用AI获取响应，传递对话历史和系统提示词
         response = await get_ai_response(
             user_id=user_id,
-            message=prompt,
-            system_prompt=system_prompt,
+            message=user_prompt,
+            system_prompt=system_prompt,  # 使用用户的系统提示词
             save_to_history=save_to_history,  
             model=model,
             conversation_history=conversation_history

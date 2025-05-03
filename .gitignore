@@ -3,6 +3,7 @@ __pycache__/
 .vscode
 .env
 user_configs
+user_configs2
 pyrightconfig.json
 docker-compose.yml
 
