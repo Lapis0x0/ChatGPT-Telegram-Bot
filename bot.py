@@ -1030,6 +1030,7 @@ async def post_init(application: Application) -> None:
         BotCommand('forget', 'Forget a memory'),
         BotCommand('summarize_memory', 'Summarize current conversation memory'),
         BotCommand('desire', 'View current desire'),
+        BotCommand('clear_history', 'Clear conversation history'),
     ])
     description = (
         "I am an Assistant, a large language model trained by OpenAI. I will do my best to help answer your questions."
@@ -1220,6 +1221,13 @@ async def view_desire(update, context):
     """查看当前主动对话欲望值"""
     await proactive_messaging.view_proactive_desire(update, context)
 
+@decorators.GroupAuthorization
+@decorators.Authorization
+@decorators.APICheck
+async def clear_history(update, context):
+    """清除用户的对话历史"""
+    await proactive_messaging.clear_conversation_history(update, context)
+
 if __name__ == '__main__':
     application = (
         ApplicationBuilder()
@@ -1255,6 +1263,7 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("forget", forget))
     application.add_handler(CommandHandler("summarize_memory", summarize_memory))
     application.add_handler(CommandHandler("desire", view_desire))
+    application.add_handler(CommandHandler("clear_history", clear_history))
     application.add_handler(InlineQueryHandler(inlinequery))
     application.add_handler(CallbackQueryHandler(button_press))
     application.add_handler(MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, lambda update, context: command_bot(update, context, prompt=None, has_command=False), block = False))

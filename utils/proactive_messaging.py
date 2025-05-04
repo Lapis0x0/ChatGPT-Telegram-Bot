@@ -652,13 +652,13 @@ async def generate_message_content(user_id, reason, system_prompt, save_to_histo
         # 构建用户消息提示词，让模型自主决策对话方向
         user_prompt = f"""
         请生成一条自然的主动消息，主动与我开始对话。
-        
+
         原因: {reason}
         当前时间: {current_time.strftime('%Y-%m-%d %H:%M')}
         
         最近的对话历史:
         {recent_history}
-        
+
         在生成消息时，请注意：
         1. 自主判断是否继续最近的对话话题，或引入新的可能感兴趣的话题
         2. 如果决定继续现有话题，确保消息内容与最近的对话历史有连贯性
@@ -970,6 +970,50 @@ async def view_proactive_desire(update, context):
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=f"查看主动对话欲望时出错: {str(e)}"
+        )
+
+# 完全清除对话历史
+async def clear_conversation_history(update, context):
+    """完全清除用户的对话历史
+    
+    参数：
+        update: Telegram更新对象
+        context: Telegram上下文
+    
+    返回：
+        无
+    """
+    try:
+        # 获取用户ID
+        chatid = update.effective_chat.id
+        user_id = str(chatid)
+        
+        # 获取机器人实例
+        robot, _, _, _ = get_robot(str(user_id))
+        
+        # 清空对话历史
+        if user_id in robot.conversation:
+            old_history_length = len(robot.conversation[user_id])
+            robot.conversation[user_id] = []
+            logging.info(f"已清除用户 {user_id} 的对话历史，共 {old_history_length} 条消息")
+            
+            # 发送确认消息
+            await context.bot.send_message(
+                chat_id=chatid,
+                text=f"✅ 对话历史已完全清除（{old_history_length} 条消息）。"
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=chatid,
+                text="没有找到对话历史记录。"
+            )
+            
+    except Exception as e:
+        logging.error(f"清除对话历史时出错: {str(e)}")
+        traceback.print_exc()
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"清除对话历史时出错: {str(e)}"
         )
 
 # 初始化主动消息功能
