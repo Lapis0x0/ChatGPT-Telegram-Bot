@@ -22,7 +22,7 @@ PROACTIVE_DESIRE_GROWTH_RATE = float(os.environ.get('PROACTIVE_DESIRE_GROWTH_RAT
 ADMIN_LIST = os.environ.get('ADMIN_LIST', '')
 
 # 连续对话配置
-MAX_CONTINUOUS_MESSAGES = int(os.environ.get('MAX_CONTINUOUS_MESSAGES', '3'))  # 最大连续消息数量
+MAX_CONTINUOUS_MESSAGES = int(os.environ.get('MAX_CONTINUOUS_MESSAGES', '2'))  # 最大连续消息数量，默认改为2
 CONTINUOUS_MESSAGE_DELAY = int(os.environ.get('CONTINUOUS_MESSAGE_DELAY', '30'))  # 连续消息之间的延迟（秒）
 
 # 主动对话欲望（用户ID -> 欲望值）
@@ -260,6 +260,23 @@ async def check_proactive_desire(context: ContextTypes.DEFAULT_TYPE):
                         logging.info(f"用户 {user_id} 正在等待回复，跳过主动消息")
                         continue
                 
+                # 检查连续主动消息数量
+                continuous_bot_messages = 0
+                if main_convo_id in robot.conversation:
+                    # 从最后一条消息开始向前检查
+                    for msg in reversed(robot.conversation[main_convo_id]):
+                        # 如果遇到用户消息，停止计数
+                        if msg.get("role") == "user" and "我想和你聊聊天" not in msg.get("content", "") and "我想继续和你聊天" not in msg.get("content", ""):
+                            break
+                        # 如果是机器人消息，增加计数
+                        if msg.get("role") == "assistant":
+                            continuous_bot_messages += 1
+                    
+                    # 如果已经有两条或更多连续机器人消息，跳过发送
+                    if continuous_bot_messages >= MAX_CONTINUOUS_MESSAGES:
+                        logging.info(f"用户 {user_id} 已有 {continuous_bot_messages} 条连续机器人消息未回复，跳过主动消息")
+                        continue
+                
                 # 获取上次发送主动消息的时间
                 last_proactive_time = getattr(robot, 'last_proactive_time', {}).get(user_id, datetime.fromtimestamp(0))
                 
@@ -465,7 +482,13 @@ async def check_user_response(context: ContextTypes.DEFAULT_TYPE, user_id: str):
                             if msg.get("role") == "assistant":
                                 continuous_count += 1
                         
+                        # 严格限制连续消息数量，确保不超过MAX_CONTINUOUS_MESSAGES
                         if time_diff >= 2 and continuous_count < MAX_CONTINUOUS_MESSAGES:
+                            # 再次检查，确保不会超过限制
+                            if continuous_count >= MAX_CONTINUOUS_MESSAGES - 1:
+                                logging.info(f"用户 {user_id} 已达到最大连续消息数量 {MAX_CONTINUOUS_MESSAGES}，不再发送后续消息")
+                                return
+                            
                             # 生成后续消息
                             logging.info(f"用户 {user_id} 在 {time_diff:.1f} 分钟内没有回复，尝试发送后续消息")
                             
@@ -639,7 +662,7 @@ async def generate_message_content(user_id, reason, system_prompt, save_to_histo
         在生成消息时，请注意：
         1. 自主判断是否继续最近的对话话题，或引入新的可能感兴趣的话题
         2. 如果决定继续现有话题，确保消息内容与最近的对话历史有连贯性
-        3. 如果决定引入新话题(建议主动引入新话题），选择你最近正在研究的内容/用户可能感兴趣的话题，但不要生硬转换
+        3. 如果决定引入新话题(建议主动引入新话题)，选择你最近正在研究的内容/用户可能感兴趣的话题，但不要生硬转换
         4. 根据当前时间适当调整消息内容（如早上问候、晚上道晚安等）
         5. 不要提及这是一条自动生成的消息或你是AI助手
         
