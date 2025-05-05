@@ -821,8 +821,8 @@ def init_proactive_messaging(application):
     
     logging.info("初始化主动消息功能")
     
-    # 设置每小时检查一次主动对话的任务（只在7点到24点之间）
-    for hour in range(7, 25):  # 7点到24点
+    # 设置每小时检查一次主动对话的任务（只在7点到23点之间）
+    for hour in range(7, 24):  # 7点到23点
         # 在每小时内随机选择一个分钟进行检查
         random_minute = random.randint(1, 59)
         # 创建定时任务

@@ -106,8 +106,10 @@ async def command_bot(update, context, language=None, prompt=translator_prompt, 
         
         # 分析用户消息并调整主动对话欲望
         if proactive_messaging.PROACTIVE_AGENT_ENABLED:
-            asyncio.create_task(proactive_messaging.analyze_message_for_desire(chatid, message))
-
+            # asyncio.create_task(proactive_messaging.analyze_message_for_desire(chatid, message))  # 已废弃，无需再调用
+            pass
+        
+        # asyncio.create_task(proactive_messaging.analyze_message_for_desire(chatid, message))  # 已废弃，无需再调用
     if has_command == False or len(context.args) > 0:
         if has_command:
             message = ' '.join(context.args)
