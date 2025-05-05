@@ -16,17 +16,11 @@ from utils.message_splitter import process_structured_messages
 # 配置项
 PROACTIVE_AGENT_ENABLED = os.environ.get('PROACTIVE_AGENT_ENABLED', 'false').lower() == 'true'
 PROACTIVE_AGENT_MODEL = os.environ.get('PROACTIVE_AGENT_MODEL', 'gemini-2.5-flash-preview-04-17')
-PROACTIVE_DESIRE_THRESHOLD = float(os.environ.get('PROACTIVE_DESIRE_THRESHOLD', '0.7'))
-# 修改：欲望值增长率（每小时）
-PROACTIVE_DESIRE_GROWTH_RATE = float(os.environ.get('PROACTIVE_DESIRE_GROWTH_RATE', '0.15'))
 ADMIN_LIST = os.environ.get('ADMIN_LIST', '')
 
 # 连续对话配置
 MAX_CONTINUOUS_MESSAGES = int(os.environ.get('MAX_CONTINUOUS_MESSAGES', '2'))  # 最大连续消息数量，默认改为2
 CONTINUOUS_MESSAGE_DELAY = int(os.environ.get('CONTINUOUS_MESSAGE_DELAY', '30'))  # 连续消息之间的延迟（秒）
-
-# 主动对话欲望（用户ID -> 欲望值）
-proactive_desire = {}
 
 # 添加：用户最后对话时间（用户ID -> 最后对话时间）
 last_user_chat_time = {}
@@ -39,166 +33,15 @@ def get_china_time():
     """获取当前东八区时间"""
     return datetime.now(CHINA_TZ)
 
-# 主动对话欲望最小值
-PROACTIVE_DESIRE_MIN = float(os.environ.get('PROACTIVE_DESIRE_MIN', '0.0'))
-
-# 主动对话欲望最大值
-PROACTIVE_DESIRE_MAX = float(os.environ.get('PROACTIVE_DESIRE_MAX', '1.0'))
-
-# 上次检查主动对话欲望的时间
-last_desire_check_time = {}
-# 检查间隔（分钟）
-DESIRE_CHECK_INTERVAL = int(os.environ.get('DESIRE_CHECK_INTERVAL', '30'))
-
-# 用户消息情感分析结果缓存
-user_message_sentiment = {}
-# 用户活跃度指数（0-1之间，越高表示用户越活跃）
-user_activity_index = {}
-# 对话深度指数（0-1之间，越高表示对话越深入）
-conversation_depth_index = {}
-
-# 初始化用户的主动对话欲望
-def init_proactive_desire(user_id):
-    """初始化用户的主动对话欲望"""
-    if user_id not in proactive_desire:
-        proactive_desire[user_id] = float(os.environ.get('INITIAL_PROACTIVE_DESIRE', '0.2'))
-        last_desire_check_time[user_id] = get_china_time()
-        last_user_chat_time[user_id] = get_china_time()  # 初始化最后对话时间
-        logging.info(f"初始化用户 {user_id} 的主动对话欲望为 {proactive_desire[user_id]}")
-
-# 增加主动对话欲望
-def increase_proactive_desire(user_id, amount):
-    """增加用户的主动对话欲望"""
-    init_proactive_desire(user_id)
-    proactive_desire[user_id] = min(proactive_desire[user_id] + amount, PROACTIVE_DESIRE_MAX)
-    logging.info(f"增加用户 {user_id} 的主动对话欲望 {amount}，当前值: {proactive_desire[user_id]}")
-
-# 减少主动对话欲望
-def decrease_proactive_desire(user_id, amount):
-    """减少用户的主动对话欲望"""
-    init_proactive_desire(user_id)
-    proactive_desire[user_id] = max(proactive_desire[user_id] - amount, PROACTIVE_DESIRE_MIN)
-    logging.info(f"减少用户 {user_id} 的主动对话欲望 {amount}，当前值: {proactive_desire[user_id]}")
-
-# 应用主动对话欲望增长（基于聊天空窗期）
-def apply_desire_decay(user_id: str):
-    """应用主动对话欲望增长（基于聊天空窗期）"""
-    # 获取当前时间
-    current_time = get_china_time()
-    
-    # 获取上次对话时间
-    last_chat = last_user_chat_time.get(user_id, current_time - timedelta(hours=1))
-    
-    # 确保 last_chat 有时区信息
-    if last_chat.tzinfo is None:
-        # 如果没有时区信息，添加东八区时区
-        last_chat = CHINA_TZ.localize(last_chat)
-    
-    # 计算时间差（小时）
-    time_diff_hours = (current_time - last_chat).total_seconds() / 3600
-    
-    # 更新上次检查时间
-    last_desire_check_time[user_id] = current_time
-    
-    # 获取用户活跃度指数（默认为0.5）
-    activity = user_activity_index.get(user_id, 0.5)
-    
-    # 基于用户活跃度调整增长率
-    # 活跃用户增长较快，不活跃用户增长较慢
-    adjusted_growth_rate = PROACTIVE_DESIRE_GROWTH_RATE * (0.7 + 0.6 * activity)
-    
-    # 计算增长量（每小时增长）
-    # 使用非线性增长曲线：开始缓慢，然后加速，最后趋于平缓
-    if time_diff_hours <= 1:
-        # 1小时内，增长较慢
-        growth_factor = 0.7
-    elif time_diff_hours <= 3:
-        # 1-3小时，增长适中
-        growth_factor = 1.0
-    elif time_diff_hours <= 8:
-        # 3-8小时，增长较快
-        growth_factor = 1.3
-    else:
-        # 8小时以上，增长非常快
-        growth_factor = 1.5
-    
-    growth_amount = adjusted_growth_rate * time_diff_hours * growth_factor
-    
-    # 应用增长
-    increase_proactive_desire(user_id, growth_amount)
-    
-    logging.info(f"用户 {user_id} 已有 {time_diff_hours:.2f} 小时未对话，活跃度:{activity:.2f}，增长因子:{growth_factor}，增加主动对话欲望 {growth_amount:.4f}，当前值: {proactive_desire[user_id]}")
-
-# 分析消息内容，调整主动对话欲望
-async def analyze_message_for_desire(user_id, message_content):
-    """分析用户消息内容，调整主动对话欲望"""
-    try:
-        # 更新用户最后对话时间
-        last_user_chat_time[user_id] = get_china_time()
-        
-        # 初始化用户的主动对话欲望
-        init_proactive_desire(user_id)
-        
-        # 分析消息内容特征
-        message_length = len(message_content)
-        has_question = '?' in message_content or '？' in message_content
-        has_emotion = any(word in message_content for word in ['喜欢', '爱', '讨厌', '恨', '开心', '难过', '生气', '期待'])
-        has_greeting = any(word in message_content for word in ['你好', '早上好', '晚上好', '嗨', 'hi', 'hello'])
-        has_farewell = any(word in message_content for word in ['再见', '拜拜', '晚安', '明天见', 'bye'])
-        
-        # 更新用户活跃度指数
-        # 消息越长，用户越活跃
-        length_factor = min(message_length / 100, 1.0)
-        # 有情感表达的消息增加活跃度
-        emotion_factor = 0.2 if has_emotion else 0
-        # 问题会增加活跃度
-        question_factor = 0.15 if has_question else 0
-        
-        # 计算新的活跃度（70%旧值 + 30%新值）
-        old_activity = user_activity_index.get(user_id, 0.5)
-        new_activity = 0.3 * (length_factor + emotion_factor + question_factor) + 0.1
-        user_activity_index[user_id] = old_activity * 0.7 + new_activity * 0.3
-        
-        # 根据消息特征调整主动对话欲望
-        desire_change = 0
-        
-        # 问候增加欲望
-        if has_greeting:
-            desire_change += 0.1
-        
-        # 道别减少欲望
-        if has_farewell:
-            desire_change -= 0.3
-        
-        # 提问增加欲望（用户可能期待进一步交流）
-        if has_question:
-            desire_change += 0.05
-        
-        # 情感表达增加欲望（表明用户投入情感）
-        if has_emotion:
-            desire_change += 0.1
-        
-        # 长消息减少欲望（用户已经表达了很多）
-        if message_length > 200:
-            desire_change -= 0.15
-        elif message_length > 100:
-            desire_change -= 0.05
-        
-        # 应用变化
-        if desire_change > 0:
-            increase_proactive_desire(user_id, desire_change)
-        elif desire_change < 0:
-            decrease_proactive_desire(user_id, abs(desire_change))
-        
-        logging.info(f"分析用户 {user_id} 消息后，活跃度:{user_activity_index[user_id]:.2f}，欲望变化:{desire_change:.2f}，当前欲望值:{proactive_desire[user_id]:.2f}")
-        
-    except Exception as e:
-        logging.error(f"分析用户消息时出错: {str(e)}")
-        traceback.print_exc()
+# 更新用户最后对话时间
+def update_last_chat_time(user_id):
+    """更新用户最后对话时间"""
+    last_user_chat_time[user_id] = get_china_time()
+    logging.info(f"更新用户 {user_id} 的最后对话时间为 {last_user_chat_time[user_id]}")
 
 # 检查是否应该发送主动消息
 async def check_proactive_desire(context: ContextTypes.DEFAULT_TYPE):
-    """定期检查所有用户的主动对话欲望，如果超过阈值则发送主动消息"""
+    """定期检查所有用户，让模型自主决定是否发送主动消息"""
     if not PROACTIVE_AGENT_ENABLED:
         return
     
@@ -212,40 +55,18 @@ async def check_proactive_desire(context: ContextTypes.DEFAULT_TYPE):
         current_time = get_china_time()
         current_hour = current_time.hour
         
-        # 遍历所有用户的主动对话欲望
+        # 如果当前时间不在7-24点之间，不执行检查
+        if current_hour < 7 or current_hour > 24:
+            logging.info(f"当前时间 {current_hour}点 不在主动消息时间范围内，跳过检查")
+            return
+        
+        logging.info(f"开始检查主动对话，当前时间: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # 遍历所有用户
         for user_id in admin_ids:
             try:
-                # 应用基于聊天空窗期的欲望增长
-                apply_desire_decay(user_id)
-                
-                # 获取用户的主动对话欲望
-                desire = proactive_desire.get(user_id, 0.0)
-                
-                # 获取用户活跃度
-                activity = user_activity_index.get(user_id, 0.5)
-                
-                # 根据时间段调整阈值
-                time_adjusted_threshold = PROACTIVE_DESIRE_THRESHOLD
-                
-                # 深夜时段(23:00-7:00)提高阈值，减少打扰
-                if current_hour >= 23 or current_hour < 7:
-                    time_adjusted_threshold += 0.2
-                # 早上和晚上的黄金时段(8:00-9:00, 19:00-22:00)降低阈值
-                elif (8 <= current_hour <= 9) or (19 <= current_hour <= 22):
-                    time_adjusted_threshold -= 0.1
-                
-                # 根据用户活跃度调整阈值
-                # 活跃用户阈值略高（不容易打扰），不活跃用户阈值略低（更容易主动联系）
-                activity_adjusted_threshold = time_adjusted_threshold + (activity - 0.5) * 0.2
-                
-                # 最终阈值不低于0.4，不高于0.9
-                final_threshold = max(0.4, min(0.9, activity_adjusted_threshold))
-                
-                logging.info(f"用户 {user_id} 的主动对话欲望: {desire:.2f}, 活跃度: {activity:.2f}, 最终阈值: {final_threshold:.2f}")
-                
-                # 检查是否有正在等待回复的消息
-                # 获取机器人实例
-                robot, _, _, _ = get_robot(str(user_id))
+                # 获取机器人实例和相关配置
+                robot, _, api_key, api_url = get_robot(str(user_id))
                 main_convo_id = str(user_id)
                 
                 # 检查是否有对话历史
@@ -288,43 +109,128 @@ async def check_proactive_desire(context: ContextTypes.DEFAULT_TYPE):
                 # 计算距离上次主动消息的时间（小时）
                 hours_since_last_proactive = (current_time - last_proactive_time).total_seconds() / 3600
                 
-                # 如果距离上次主动消息不足2小时，增加阈值，避免频繁打扰
+                # 如果距离上次主动消息不足2小时，跳过检查
                 if hours_since_last_proactive < 2:
-                    final_threshold += 0.2
-                    logging.info(f"距离上次主动消息仅 {hours_since_last_proactive:.1f} 小时，增加阈值到 {final_threshold:.2f}")
+                    logging.info(f"距离上次主动消息仅 {hours_since_last_proactive:.1f} 小时，跳过检查")
+                    continue
                 
-                # 引入随机因素，增加自然性（80%概率正常检查，20%概率随机触发或抑制）
-                random_factor = random.random()
-                if random_factor < 0.1:  # 10%概率降低阈值
-                    final_threshold -= 0.15
-                    logging.info(f"随机因素触发，降低阈值到 {final_threshold:.2f}")
-                elif random_factor > 0.9:  # 10%概率提高阈值
-                    final_threshold += 0.15
-                    logging.info(f"随机因素触发，提高阈值到 {final_threshold:.2f}")
+                # 获取上次用户对话时间
+                last_chat = last_user_chat_time.get(user_id, current_time - timedelta(hours=24))
                 
-                # 检查是否超过阈值
-                if desire >= final_threshold:
-                    # 生成发送主动消息的原因
-                    reason = "主动对话欲望达到阈值"
+                # 确保 last_chat 有时区信息
+                if last_chat.tzinfo is None:
+                    # 如果没有时区信息，添加东八区时区
+                    last_chat = CHINA_TZ.localize(last_chat)
+                
+                # 计算距离上次用户对话的时间（小时）
+                hours_since_last_chat = (current_time - last_chat).total_seconds() / 3600
+                
+                # 获取系统提示词
+                system_prompt = Users.get_config(str(user_id), "systemprompt")
+                
+                # 添加当前东八区日期和时间
+                current_datetime = datetime.now(CHINA_TZ)
+                current_date = current_datetime.strftime("%Y-%m-%d")
+                current_time_str = current_datetime.strftime("%H:%M")
+                
+                # 构建特殊的系统提示词，让模型自主决定是否发送主动消息
+                decision_prompt = f"""当前日期和时间（东八区）：{current_date} {current_time_str}
+
+{system_prompt}
+
+你现在需要决定是否要主动给用户发送一条消息。请考虑以下因素：
+1. 当前时间是否适合打扰用户
+2. 距离上次对话的时间长短（已经过去了 {hours_since_last_chat:.1f} 小时）
+3. 是否有有价值的内容可以分享
+
+请只回复 JSON 格式：
+```json
+{{
+  "decision": true/false,  // 是否要发送主动消息
+  "reason": "你的决定理由",  // 简短说明为什么做出这个决定
+  "message": "如果决定发送，这里是消息内容"  // 如果决定发送，这里填写要发送的消息内容
+}}
+```
+
+注意：如果决定不发送消息，message字段可以留空。如果决定发送，请确保message字段包含有意义的内容。"""
+                
+                # 调用AI获取决策
+                model = os.environ.get('PROACTIVE_AGENT_MODEL', 'gemini-2.5-flash-preview-04-17')
+                decision_response = await get_ai_response(user_id, "请决定是否要发送主动消息", decision_prompt, save_to_history=False, model=model)
+                
+                if not decision_response:
+                    logging.error(f"无法为用户 {user_id} 获取主动消息决策")
+                    continue
+                
+                # 尝试解析JSON响应
+                try:
+                    # 尝试提取JSON部分（可能包含在代码块中）
+                    json_match = re.search(r'```(?:json)?\s*({[\s\S]*?})\s*```', decision_response)
+                    if json_match:
+                        decision_json = json.loads(json_match.group(1))
+                    else:
+                        # 尝试直接解析整个响应
+                        decision_json = json.loads(decision_response)
                     
-                    # 发送主动消息
-                    await send_proactive_message(context, str(user_id), reason)
+                    # 获取决策
+                    should_send = decision_json.get("decision", False)
+                    reason = decision_json.get("reason", "未提供理由")
+                    message_content = decision_json.get("message", "")
                     
-                    # 记录本次主动消息时间
-                    if not hasattr(robot, 'last_proactive_time'):
-                        robot.last_proactive_time = {}
-                    robot.last_proactive_time[user_id] = current_time
+                    logging.info(f"AI决策: 是否发送主动消息 = {should_send}, 理由: {reason}")
                     
-                    # 重置主动对话欲望
-                    proactive_desire[user_id] = float(os.environ.get('RESET_PROACTIVE_DESIRE', '0.1'))
-                    logging.info(f"已发送主动消息并重置用户 {user_id} 的主动对话欲望为 {proactive_desire[user_id]}")
+                    # 如果决定发送消息
+                    if should_send and message_content:
+                        # 处理结构化消息，检查是否需要拆分发送
+                        processed_result = await process_structured_messages(
+                            message_content, 
+                            context, 
+                            user_id
+                        )
+                        
+                        # 如果处理后的结果不为空字符串，说明消息没有被拆分发送，使用普通方式发送
+                        if processed_result != "":
+                            await context.bot.send_message(chat_id=user_id, text=processed_result)
+                        
+                        # 将消息保存到对话历史
+                        if main_convo_id in robot.conversation:
+                            # 添加虚拟的用户消息，表示用户想聊天（但不会显示给用户）
+                            robot.add_to_conversation({"role": "user", "content": "我想和你聊聊天"}, main_convo_id)
+                            # 添加机器人的回复，并包含时间戳
+                            robot.add_to_conversation({
+                                "role": "assistant", 
+                                "content": message_content,
+                                "timestamp": str(current_datetime.timestamp())
+                            }, main_convo_id)
+                            logging.info(f"已发送主动消息给用户 {user_id} 并加入到主对话历史")
+                        
+                        # 记录本次主动消息时间
+                        if not hasattr(robot, 'last_proactive_time'):
+                            robot.last_proactive_time = {}
+                        robot.last_proactive_time[user_id] = current_datetime
+                        
+                        # 设置检查用户回复的定时任务
+                        # 如果用户在一定时间内没有回复，可能会发送后续消息
+                        job_name = f"check_response_{user_id}"
+                        remove_job_if_exists(job_name, context)
+                        context.job_queue.run_once(
+                            lambda ctx: asyncio.create_task(check_user_response(ctx, user_id)),
+                            CONTINUOUS_MESSAGE_DELAY,
+                            name=job_name
+                        )
+                    else:
+                        logging.info(f"AI决定不发送主动消息给用户 {user_id}: {reason}")
+                
+                except Exception as e:
+                    logging.error(f"解析AI决策时出错: {str(e)}")
+                    traceback.print_exc()
                 
             except Exception as e:
-                logging.error(f"检查用户 {user_id} 的主动对话欲望时出错: {str(e)}")
+                logging.error(f"为用户 {user_id} 处理主动消息时出错: {str(e)}")
                 traceback.print_exc()
                 
     except Exception as e:
-        logging.error(f"检查主动对话欲望时出错: {str(e)}")
+        logging.error(f"检查主动对话时出错: {str(e)}")
         traceback.print_exc()
 
 # 获取管理员ID列表
@@ -393,9 +299,10 @@ async def send_proactive_message(context: ContextTypes.DEFAULT_TYPE, user_id: st
             }, main_convo_id)
             logging.info(f"已发送主动消息给用户 {user_id} 并加入到主对话历史")
         
-        # 重置主动对话欲望值
-        proactive_desire[user_id] = float(os.environ.get('RESET_PROACTIVE_DESIRE', '0.1'))
-        logging.info(f"已发送主动消息并重置用户 {user_id} 的主动对话欲望为 {proactive_desire[user_id]}")
+        # 记录本次主动消息时间
+        if not hasattr(robot, 'last_proactive_time'):
+            robot.last_proactive_time = {}
+        robot.last_proactive_time[user_id] = current_datetime
         
         # 设置检查用户回复的定时任务
         job_id = f"check_response_{user_id}"
@@ -905,117 +812,6 @@ async def set_custom_message_time(context: ContextTypes.DEFAULT_TYPE, user_id: s
         logging.error(f"手动设置消息时间时出错: {str(e)}")
         return f"设置消息时间失败：{str(e)}"
 
-# 查看当前主动对话欲望
-async def view_proactive_desire(update, context):
-    """查看当前主动对话欲望值
-    
-    参数：
-        update: Telegram更新对象
-        context: Telegram上下文
-    
-    返回：
-        无
-    """
-    try:
-        # 获取用户ID
-        chatid = update.effective_chat.id
-        user_id = str(chatid)
-        
-        # 初始化用户的主动对话欲望（如果不存在）
-        init_proactive_desire(user_id)
-        
-        # 获取当前欲望值
-        desire = proactive_desire.get(user_id, 0.0)
-        
-        # 获取用户活跃度
-        activity = user_activity_index.get(user_id, 0.5)
-        
-        # 获取当前时间
-        current_time = get_china_time()
-        
-        # 获取上次检查时间
-        last_check = last_desire_check_time.get(user_id, current_time)
-        
-        # 计算距离上次检查的时间（小时）
-        hours_since_last_check = (current_time - last_check).total_seconds() / 3600
-        
-        # 获取上次对话时间
-        last_chat = last_user_chat_time.get(user_id, current_time)
-        
-        # 计算距离上次对话的时间（小时）
-        hours_since_last_chat = (current_time - last_chat).total_seconds() / 3600
-        
-        # 构建回复消息
-        message = f"📊 **主动对话欲望状态**\n\n"
-        message += f"当前欲望值: {desire:.2f} / {PROACTIVE_DESIRE_THRESHOLD:.2f} (阈值)\n"
-        message += f"用户活跃度: {activity:.2f}\n"
-        message += f"距上次对话: {hours_since_last_chat:.1f} 小时\n"
-        
-        # 预测下一次可能的主动消息时间
-        if desire < PROACTIVE_DESIRE_THRESHOLD:
-            # 计算还需多少小时达到阈值
-            growth_rate = PROACTIVE_DESIRE_GROWTH_RATE * (1.0 - activity * 0.5)  # 基于活跃度调整增长率
-            hours_to_threshold = (PROACTIVE_DESIRE_THRESHOLD - desire) / growth_rate
-            estimated_time = current_time + timedelta(hours=hours_to_threshold)
-            message += f"\n预计下次主动消息: {estimated_time.strftime('%Y-%m-%d %H:%M')} (约 {hours_to_threshold:.1f} 小时后)"
-        else:
-            message += f"\n当前欲望值已超过阈值，可能很快发送主动消息"
-        
-        # 发送消息
-        await context.bot.send_message(chat_id=chatid, text=message)
-        
-    except Exception as e:
-        logging.error(f"查看主动对话欲望时出错: {str(e)}")
-        traceback.print_exc()
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"查看主动对话欲望时出错: {str(e)}"
-        )
-
-# 完全清除对话历史
-async def clear_conversation_history(update, context):
-    """完全清除用户的对话历史
-    
-    参数：
-        update: Telegram更新对象
-        context: Telegram上下文
-    
-    返回：
-        无
-    """
-    try:
-        # 获取用户ID
-        chatid = update.effective_chat.id
-        user_id = str(chatid)
-        
-        # 获取机器人实例
-        robot, _, _, _ = get_robot(str(user_id))
-        
-        # 清空对话历史
-        if user_id in robot.conversation:
-            old_history_length = len(robot.conversation[user_id])
-            robot.conversation[user_id] = []
-            logging.info(f"已清除用户 {user_id} 的对话历史，共 {old_history_length} 条消息")
-            
-            # 发送确认消息
-            await context.bot.send_message(
-                chat_id=chatid,
-                text=f"✅ 对话历史已完全清除（{old_history_length} 条消息）。"
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=chatid,
-                text="没有找到对话历史记录。"
-            )
-            
-    except Exception as e:
-        logging.error(f"清除对话历史时出错: {str(e)}")
-        traceback.print_exc()
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text=f"清除对话历史时出错: {str(e)}"
-        )
-
 # 初始化主动消息功能
 def init_proactive_messaging(application):
     """初始化主动消息功能"""
@@ -1025,31 +821,16 @@ def init_proactive_messaging(application):
     
     logging.info("初始化主动消息功能")
     
-    # 设置定期检查主动对话欲望的任务
-    application.job_queue.run_repeating(
-        check_proactive_desire,
-        interval=60,  # 每分钟检查一次
-        first=1,
-        name="proactive_desire_check"
-    )
-    
-    # 设置定期增长主动对话欲望的任务（基于聊天空窗期）
-    application.job_queue.run_repeating(
-        decay_proactive_desire,
-        interval=1800,  # 每30分钟检查一次
-        first=10,
-        name="proactive_desire_growth"
-    )
+    # 设置每小时检查一次主动对话的任务（只在7点到24点之间）
+    for hour in range(7, 25):  # 7点到24点
+        # 在每小时内随机选择一个分钟进行检查
+        random_minute = random.randint(1, 59)
+        # 创建定时任务
+        application.job_queue.run_daily(
+            check_proactive_desire,
+            time=dt.time(hour=hour, minute=random_minute),
+            name=f"proactive_check_{hour}_{random_minute}"
+        )
+        logging.info(f"已设置在 {hour}:{random_minute} 检查主动对话")
     
     logging.info("主动消息功能初始化完成")
-
-# 定期增长所有用户的主动对话欲望（基于聊天空窗期）
-async def decay_proactive_desire(context: ContextTypes.DEFAULT_TYPE):
-    """定期增长所有用户的主动对话欲望（基于聊天空窗期）"""
-    for user_id in list(proactive_desire.keys()):
-        try:
-            # 应用基于聊天空窗期的欲望增长
-            apply_desire_decay(user_id)
-        except Exception as e:
-            logging.error(f"增长用户 {user_id} 的主动对话欲望时出错: {str(e)}")
-            traceback.print_exc()
