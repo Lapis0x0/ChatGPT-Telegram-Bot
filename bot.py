@@ -11,7 +11,7 @@ import utils.proactive_messaging as proactive_messaging
 from utils.message_splitter import process_structured_messages, get_structured_message_prompt
 
 from md2tgmd.src.md2tgmd import escape, split_code, replace_all
-from aient.src.aient.utils.prompt import translator_en2zh_prompt, translator_prompt
+from aient.src.aient.utils.prompt import translator_prompt
 from aient.src.aient.utils.scripts import Document_extract, claude_replace
 from aient.src.aient.core.utils import get_engine, get_image_message, get_text_message
 import config
@@ -119,7 +119,7 @@ async def command_bot(update, context, language=None, prompt=translator_prompt, 
                 if language == "english":
                     prompt = prompt.format(language)
                 else:
-                    prompt = translator_en2zh_prompt
+                    prompt = translator_prompt
                 pass_history = 0
             message = prompt + message
         if message == None:
@@ -1021,17 +1021,13 @@ async def post_init(application: Application) -> None:
         BotCommand('reset', 'Reset the bot'),
         BotCommand('start', 'Start the bot'),
         BotCommand('model', 'Change AI model'),
-        BotCommand('en2zh', 'Translate to Chinese'),
-        BotCommand('zh2en', 'Translate to English'),
         BotCommand('plan_messages', 'Plan proactive messages'),
         BotCommand('test_message', 'Send a test proactive message'),
         BotCommand('view_messages', 'View planned messages'),
-        BotCommand('set_message_time', 'Set message time'),
         BotCommand('remember', 'Remember something'),
         BotCommand('memories', 'List all memories'),
         BotCommand('forget', 'Forget a memory'),
         BotCommand('summarize_memory', 'Summarize current conversation memory'),
-        BotCommand('desire', 'View current desire'),
         BotCommand('clear_history', 'Clear conversation history'),
     ])
     description = (
@@ -1070,41 +1066,6 @@ async def view_messages(update, context):
         await context.bot.send_message(chat_id=update.effective_chat.id, text="主动消息功能未启用")
         return
     result = await proactive_messaging.view_planned_messages()
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=result)
-
-@decorators.GroupAuthorization
-@decorators.Authorization
-@decorators.APICheck
-async def set_message_time(update, context):
-    """手动设置消息触发时间"""
-    if not proactive_messaging.PROACTIVE_AGENT_ENABLED:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="主动消息功能未启用")
-        return
-    
-    # 检查参数
-    args = context.args
-    if not args or len(args) < 1:
-        usage = (
-            "使用方法: /set_message_time HH:MM [原因]\n\n"
-            "例如:\n"
-            "/set_message_time 14:30 下午茶时间聊天\n"
-            "/set_message_time 18:45 晚餐提醒"
-        )
-        await context.bot.send_message(chat_id=update.effective_chat.id, text=usage)
-        return
-    
-    # 解析参数
-    time_str = args[0]
-    reason = " ".join(args[1:]) if len(args) > 1 else "用户手动设置"
-    
-    # 设置消息时间
-    result = await proactive_messaging.set_custom_message_time(
-        context=context,
-        user_id=str(update.effective_chat.id),
-        time_str=time_str,
-        reason=reason
-    )
-    
     await context.bot.send_message(chat_id=update.effective_chat.id, text=result)
 
 @decorators.GroupAuthorization
@@ -1219,13 +1180,6 @@ async def summarize_memory(update, context):
 @decorators.GroupAuthorization
 @decorators.Authorization
 @decorators.APICheck
-async def view_desire(update, context):
-    """查看当前主动对话欲望值"""
-    await proactive_messaging.view_proactive_desire(update, context)
-
-@decorators.GroupAuthorization
-@decorators.Authorization
-@decorators.APICheck
 async def clear_history(update, context):
     """清除用户的对话历史"""
     await proactive_messaging.clear_conversation_history(update, context)
@@ -1254,17 +1208,13 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("reset", reset_chat))
     application.add_handler(CommandHandler("model", change_model))
-    application.add_handler(CommandHandler("en2zh", lambda update, context: command_bot(update, context, "Simplified Chinese")))
-    application.add_handler(CommandHandler("zh2en", lambda update, context: command_bot(update, context, "english")))
     application.add_handler(CommandHandler("plan_messages", plan_messages))
     application.add_handler(CommandHandler("test_message", test_message))
     application.add_handler(CommandHandler("view_messages", view_messages))
-    application.add_handler(CommandHandler("set_message_time", set_message_time))
     application.add_handler(CommandHandler("remember", remember))
     application.add_handler(CommandHandler("memories", memories))
     application.add_handler(CommandHandler("forget", forget))
     application.add_handler(CommandHandler("summarize_memory", summarize_memory))
-    application.add_handler(CommandHandler("desire", view_desire))
     application.add_handler(CommandHandler("clear_history", clear_history))
     application.add_handler(InlineQueryHandler(inlinequery))
     application.add_handler(CallbackQueryHandler(button_press))
