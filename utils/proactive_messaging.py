@@ -28,6 +28,15 @@ last_user_chat_time = {}
 # 定义东八区时区
 CHINA_TZ = pytz.timezone('Asia/Shanghai')
 
+# 添加：主动对话欲望值（用户ID -> 欲望值）
+proactive_desire = {}
+
+# 添加：连续对话状态（用户ID -> 状态）
+continuous_conversation_state = {}
+
+# 添加：计划的消息时间（用户ID -> 时间列表）
+planned_message_times = {}
+
 # 获取当前东八区时间
 def get_china_time():
     """获取当前东八区时间"""
@@ -770,3 +779,57 @@ def init_proactive_messaging(application):
         logging.info(f"已设置在 {hour}:{random_minute} 检查主动对话")
     
     logging.info("主动消息功能初始化完成")
+
+# 清除用户的对话历史
+async def clear_conversation_history(update, context):
+    """清除用户的对话历史
+    
+    参数：
+        update: Telegram更新对象
+        context: 上下文对象
+    
+    返回：
+        None
+    """
+    try:
+        user_id = str(update.effective_chat.id)
+        
+        # 获取机器人实例
+        robot, _, _, _ = get_robot(user_id)
+        
+        # 清除该用户的对话历史
+        if user_id in robot.conversation:
+            robot.conversation[user_id] = []
+            logging.info(f"已清除用户 {user_id} 的对话历史")
+        
+        # 清除临时对话ID
+        temp_convo_id = f"temp_{user_id}"
+        if temp_convo_id in robot.conversation:
+            robot.conversation[temp_convo_id] = []
+            logging.info(f"已清除用户 {user_id} 的临时对话历史")
+        
+        # 清除连续对话状态
+        if user_id in continuous_conversation_state:
+            del continuous_conversation_state[user_id]
+            logging.info(f"已清除用户 {user_id} 的连续对话状态")
+        
+        # 清除主动对话欲望
+        if user_id in proactive_desire:
+            del proactive_desire[user_id]
+            logging.info(f"已重置用户 {user_id} 的主动对话欲望")
+        
+        # 发送确认消息
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="✅ 已清除所有对话历史。"
+        )
+        
+    except Exception as e:
+        logging.error(f"清除对话历史时出错: {str(e)}")
+        traceback.print_exc()
+        
+        # 发送错误消息
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"❌ 清除对话历史失败: {str(e)}"
+        )

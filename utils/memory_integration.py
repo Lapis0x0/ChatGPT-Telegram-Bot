@@ -124,6 +124,36 @@ async def forget_memory(user_id, memory_id):
         logging.error(f"删除记忆时出错: {str(e)}")
         return False
 
+async def forget_memories(user_id, memory_ids):
+    """批量删除多个记忆
+    
+    参数：
+        user_id: 用户ID
+        memory_ids: 记忆ID列表
+        
+    返回：
+        dict: 包含成功和失败的记忆ID
+    """
+    results = {
+        "success": [],
+        "failed": []
+    }
+    
+    try:
+        memory_system = MemorySystem(user_id)
+        for memory_id in memory_ids:
+            try:
+                memory_system.forget_memory(memory_id)
+                results["success"].append(memory_id)
+            except Exception as e:
+                logging.error(f"删除记忆 {memory_id} 时出错: {str(e)}")
+                results["failed"].append(memory_id)
+        
+        return results
+    except Exception as e:
+        logging.error(f"批量删除记忆时出错: {str(e)}")
+        return results
+
 async def summarize_with_flash(user_id, history, robot):
     """使用Gemini Flash模型总结对话历史并提取记忆
     

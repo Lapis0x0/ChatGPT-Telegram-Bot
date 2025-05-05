@@ -1146,6 +1146,76 @@ async def forget(update, context):
 @decorators.GroupAuthorization
 @decorators.Authorization
 @decorators.APICheck
+async def forget_batch(update, context):
+    """批量忘记多个记忆"""
+    if not context.args or len(context.args) == 0:
+        usage = "使用方法: /forget_batch [记忆ID1] [记忆ID2] ...\n\n例如:\n/forget_batch 1 3 5\n\n使用 /memories 命令查看所有记忆及其ID。"
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=usage)
+        return
+    
+    user_id = str(update.effective_chat.id)
+    memory_ids = []
+    invalid_ids = []
+    
+    # 处理所有参数，转换为整数ID
+    for arg in context.args:
+        try:
+            memory_id = int(arg)
+            memory_ids.append(memory_id)
+        except ValueError:
+            invalid_ids.append(arg)
+    
+    # 如果有无效ID，提示用户
+    if invalid_ids:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id, 
+            text=f"以下ID无效（必须是数字）: {', '.join(invalid_ids)}"
+        )
+        if not memory_ids:  # 如果没有有效ID，直接返回
+            return
+    
+    # 如果没有有效ID，直接返回
+    if not memory_ids:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id, 
+            text="没有提供有效的记忆ID。使用 /memories 命令查看所有记忆及其ID。"
+        )
+        return
+    
+    # 发送处理中消息
+    processing_message = await context.bot.send_message(
+        chat_id=update.effective_chat.id, 
+        text=f"正在删除 {len(memory_ids)} 条记忆..."
+    )
+    
+    # 从memory_integration.py导入forget_memories函数
+    from utils.memory_integration import forget_memories
+    
+    # 尝试批量删除记忆
+    results = await forget_memories(user_id, memory_ids)
+    
+    # 构建结果消息
+    if results["success"]:
+        success_text = f"已成功删除 {len(results['success'])} 条记忆（ID: {', '.join(map(str, results['success']))}）"
+    else:
+        success_text = "没有成功删除任何记忆"
+    
+    if results["failed"]:
+        failed_text = f"删除失败 {len(results['failed'])} 条记忆（ID: {', '.join(map(str, results['failed']))}）"
+        result_message = f"{success_text}\n{failed_text}"
+    else:
+        result_message = success_text
+    
+    # 更新处理中消息为结果消息
+    await context.bot.edit_message_text(
+        chat_id=update.effective_chat.id,
+        message_id=processing_message.message_id,
+        text=result_message
+    )
+
+@decorators.GroupAuthorization
+@decorators.Authorization
+@decorators.APICheck
 async def summarize_memory(update, context):
     """强制总结当前对话记忆"""
     chatid = update.effective_chat.id
@@ -1214,6 +1284,7 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("remember", remember))
     application.add_handler(CommandHandler("memories", memories))
     application.add_handler(CommandHandler("forget", forget))
+    application.add_handler(CommandHandler("forget_batch", forget_batch))
     application.add_handler(CommandHandler("summarize_memory", summarize_memory))
     application.add_handler(CommandHandler("clear_history", clear_history))
     application.add_handler(InlineQueryHandler(inlinequery))
