@@ -1017,18 +1017,18 @@ async def unknown(update, context): # 当用户输入未知命令时，返回文
 
 async def post_init(application: Application) -> None:
     await application.bot.set_my_commands([
-        BotCommand('info', 'Basic information'),
-        BotCommand('reset', 'Reset the bot'),
-        BotCommand('start', 'Start the bot'),
-        BotCommand('model', 'Change AI model'),
-        BotCommand('plan_messages', 'Plan proactive messages'),
-        BotCommand('test_message', 'Send a test proactive message'),
-        BotCommand('view_messages', 'View planned messages'),
-        BotCommand('remember', 'Remember something'),
-        BotCommand('memories', 'List all memories'),
-        BotCommand('forget', 'Forget a memory'),
-        BotCommand('summarize_memory', 'Summarize current conversation memory'),
-        BotCommand('clear_history', 'Clear conversation history'),
+        BotCommand('info', '基本信息'),
+        BotCommand('reset', '重置机器人'),
+        BotCommand('start', '启动机器人'),
+        BotCommand('model', '切换AI模型'),
+        BotCommand('plan_messages', '规划主动消息'),
+        BotCommand('test_message', '发送测试主动消息'),
+        BotCommand('view_messages', '查看已规划消息'),
+        BotCommand('remember', '记住一条信息'),
+        BotCommand('memories', '列出所有记忆'),
+        BotCommand('forget', '遗忘一条记忆'),
+        BotCommand('summarize_memory', '总结当前对话记忆'),
+        BotCommand('clear_history', '清除对话历史'),
     ])
     description = (
         "I am an Assistant, a large language model trained by OpenAI. I will do my best to help answer your questions."
