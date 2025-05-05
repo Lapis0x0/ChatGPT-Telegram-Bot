@@ -328,7 +328,7 @@ Users = UserConfig(mode=CHAT_MODE, api_key=API, api_url=API_URL, engine=GPT_ENGI
 temperature = float(os.environ.get('temperature', '0.5'))
 CLAUDE_API = os.environ.get('claude_api_key', None)
 
-ChatGPTbot, SummaryBot, groqBot, vertexBot, whisperBot, duckBot = None, None, None, None, None
+ChatGPTbot, SummaryBot, groqBot, vertexBot, whisperBot, duckBot = None, None, None, None, None, None
 def InitEngine(chat_id=None):
     global Users, ChatGPTbot, SummaryBot, groqBot, vertexBot, whisperBot, duckBot
     api_key = Users.get_config(chat_id, "api_key")
