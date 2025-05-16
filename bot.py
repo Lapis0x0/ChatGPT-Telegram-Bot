@@ -9,6 +9,7 @@ import utils.proactive_messaging as proactive_messaging
 from utils.memory_integration import process_memory, get_memory_enhanced_prompt, add_explicit_memory, list_memories, forget_memory, track_conversation, force_summarize_memory
 import utils.proactive_messaging as proactive_messaging
 from utils.message_splitter import process_structured_messages, get_structured_message_prompt
+from utils.memory_commands import list_new_memories, add_new_memory, delete_new_memory
 
 from md2tgmd.src.md2tgmd import escape, split_code, replace_all
 from aient.src.aient.utils.prompt import translator_prompt
@@ -331,7 +332,9 @@ async def getChatGPT(update_message, context, title, robot, message, chatid, mes
         first_chunk = True
         
         # print("text", text)
-        async for data in robot.ask_stream_async(text, convo_id=convo_id, pass_history=pass_history, model=model_name, language=language, api_url=api_url, api_key=api_key, system_prompt=system_prompt, plugins=plugins):
+        # 传递用户ID给Gemini模型，启用基于function calling的记忆系统
+        user_id = str(update_message.from_user.id) if update_message and update_message.from_user else None
+        async for data in robot.ask_stream_async(text, convo_id=convo_id, model=model_name, language=language, system_prompt=system_prompt, pass_history=pass_history, api_key=api_key, api_url=api_url, user_id=user_id, plugins=plugins):
         # for data in robot.ask_stream(text, convo_id=convo_id, pass_history=pass_history, model=model_name):
             if stop_event.is_set() and convo_id == target_convo_id and answer_messageid < reset_mess_id:
                 return
@@ -1287,6 +1290,11 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler("forget_batch", forget_batch))
     application.add_handler(CommandHandler("summarize_memory", summarize_memory))
     application.add_handler(CommandHandler("clear_history", clear_history))
+    
+    # 新的基于function calling的记忆系统命令
+    application.add_handler(CommandHandler("new_memories", list_new_memories))
+    application.add_handler(CommandHandler("new_memory", add_new_memory))
+    application.add_handler(CommandHandler("forget_new", delete_new_memory))
     application.add_handler(InlineQueryHandler(inlinequery))
     application.add_handler(CallbackQueryHandler(button_press))
     application.add_handler(MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, lambda update, context: command_bot(update, context, prompt=None, has_command=False), block = False))
